@@ -86,7 +86,7 @@ class CliTests(unittest.TestCase):
             main(["--compare", "raise", "slate"])
 
         report = output.getvalue()
-        self.assertIn("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail", report)
+        self.assertIn("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail  Risk", report)
         self.assertIn("raise", report)
         self.assertIn("slate", report)
 
@@ -114,7 +114,7 @@ class CliTests(unittest.TestCase):
         report = output.getvalue()
         lines = report.strip().splitlines()
         self.assertEqual(len(lines), 4)
-        self.assertIn("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail", report)
+        self.assertIn("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail  Risk", report)
 
     def test_format_comparison_row_includes_summary_counts(self):
         words = ("raise", "crane", "slate")
@@ -126,6 +126,15 @@ class CliTests(unittest.TestCase):
         self.assertIn("raise", row)
         self.assertIn("3", row)
         self.assertTrue(row.endswith("0"))
+
+    def test_build_comparison_row_includes_risk_score(self):
+        words = ("raise", "crane", "slate")
+        result = run_simulation(words, words, first_guess="raise")
+
+        row = build_comparison_row("raise", result)
+
+        expected_risk = row["fives"] * 2 + row["sixes"] * 5 + row["failed"] * 20
+        self.assertEqual(row["risk_score"], expected_risk)
 
     def test_build_top_opener_rows_limits_and_sorts_by_average(self):
         words = ("raise", "crane", "slate")
@@ -147,6 +156,7 @@ class CliTests(unittest.TestCase):
                 "fives": 0,
                 "sixes": 0,
                 "failed": 0,
+                "risk_score": 0,
             },
         )
 
@@ -158,7 +168,7 @@ class CliTests(unittest.TestCase):
             csv_text = path.read_text(encoding="utf-8")
 
         self.assertIn(",".join(CSV_COLUMNS), csv_text)
-        self.assertIn("raise,3,3,1.67,3,3,0,0,0", csv_text)
+        self.assertIn("raise,3,3,1.67,3,3,0,0,0,0", csv_text)
 
     def test_main_with_csv_still_prints_comparison_table(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -171,9 +181,10 @@ class CliTests(unittest.TestCase):
             report = output.getvalue()
             csv_text = csv_path.read_text(encoding="utf-8")
 
-        self.assertIn("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail", report)
+        self.assertIn("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail  Risk", report)
         self.assertIn("raise", report)
         self.assertIn("first_guess,tested,solved,average", csv_text)
+        self.assertIn("risk_score", csv_text)
 
     def test_main_top_openers_with_csv_writes_file_and_prints_table(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -202,9 +213,10 @@ class CliTests(unittest.TestCase):
             report = output.getvalue()
             csv_text = csv_path.read_text(encoding="utf-8")
 
-        self.assertIn("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail", report)
+        self.assertIn("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail  Risk", report)
         self.assertEqual(len(csv_text.strip().splitlines()), 3)
         self.assertIn("first_guess,tested,solved,average", csv_text)
+        self.assertIn("risk_score", csv_text)
 
     def test_main_uses_custom_word_list_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:

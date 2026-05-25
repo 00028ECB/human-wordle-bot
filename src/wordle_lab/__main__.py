@@ -22,6 +22,7 @@ CSV_COLUMNS = (
     "fives",
     "sixes",
     "failed",
+    "risk_score",
 )
 
 
@@ -132,6 +133,7 @@ def build_comparison_row(first_guess, result):
     distribution = result.guess_distribution
     solved_in_3_or_fewer = sum(distribution[guess_count] for guess_count in range(1, 4))
     solved_in_4_or_fewer = sum(distribution[guess_count] for guess_count in range(1, 5))
+    risk_score = distribution[5] * 2 + distribution[6] * 5 + result.failed_count * 20
     return {
         "first_guess": first_guess,
         "tested": len(result.games),
@@ -142,11 +144,12 @@ def build_comparison_row(first_guess, result):
         "fives": distribution[5],
         "sixes": distribution[6],
         "failed": result.failed_count,
+        "risk_score": risk_score,
     }
 
 
 def print_comparison_report(rows):
-    print("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail")
+    print("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail  Risk")
     for row in rows:
         print(format_comparison_row(row))
 
@@ -161,7 +164,8 @@ def format_comparison_row(row):
         f"{row['solved_4_or_less']:<5} "
         f"{row['fives']:<3} "
         f"{row['sixes']:<3} "
-        f"{row['failed']}"
+        f"{row['failed']:<5} "
+        f"{row['risk_score']}"
     )
 
 
