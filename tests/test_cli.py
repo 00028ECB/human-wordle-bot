@@ -37,6 +37,16 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.top_openers, 25)
 
+    def test_parser_accepts_rank_by(self):
+        args = build_parser().parse_args(["--top-openers", "25", "--rank-by", "risk"])
+
+        self.assertEqual(args.rank_by, "risk")
+
+    def test_parser_defaults_rank_by_to_average(self):
+        args = build_parser().parse_args(["--top-openers", "25"])
+
+        self.assertEqual(args.rank_by, "average")
+
     def test_parser_accepts_csv_path(self):
         args = build_parser().parse_args(
             ["--compare", "raise", "slate", "--csv", "results/out.csv"]
@@ -136,13 +146,32 @@ class CliTests(unittest.TestCase):
         expected_risk = row["fives"] * 2 + row["sixes"] * 5 + row["failed"] * 20
         self.assertEqual(row["risk_score"], expected_risk)
 
-    def test_build_top_opener_rows_limits_and_sorts_by_average(self):
+    def test_build_top_opener_rows_limits_and_sorts_by_average_by_default(self):
         words = ("raise", "crane", "slate")
 
         rows = build_top_opener_rows(2, words, words)
 
         self.assertEqual(len(rows), 2)
         self.assertLessEqual(float(rows[0]["average"]), float(rows[1]["average"]))
+
+    def test_build_top_opener_rows_can_rank_by_risk(self):
+        words = ("raise", "crane", "slate")
+
+        rows = build_top_opener_rows(3, words, words, rank_by="risk")
+
+        risk_scores = [row["risk_score"] for row in rows]
+        self.assertEqual(risk_scores, sorted(risk_scores))
+
+    def test_build_top_opener_rows_can_rank_balanced(self):
+        words = ("raise", "crane", "slate")
+
+        rows = build_top_opener_rows(3, words, words, rank_by="balanced")
+
+        ranking_values = [
+            (row["risk_score"], float(row["average"]), -row["solved_3_or_less"])
+            for row in rows
+        ]
+        self.assertEqual(ranking_values, sorted(ranking_values))
 
     def test_write_comparison_csv_creates_parent_folder(self):
         rows = (
@@ -205,6 +234,8 @@ class CliTests(unittest.TestCase):
                         str(allowed_path),
                         "--top-openers",
                         "2",
+                        "--rank-by",
+                        "risk",
                         "--csv",
                         str(csv_path),
                     ]

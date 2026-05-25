@@ -52,6 +52,12 @@ def build_parser():
         help="write compare results to a CSV file",
     )
     parser.add_argument(
+        "--rank-by",
+        choices=("average", "risk", "balanced"),
+        default="average",
+        help="ranking method for --top-openers (default: average)",
+    )
+    parser.add_argument(
         "--answers",
         default=str(DEFAULT_ANSWERS_PATH),
         help=f"possible answer word list (default: {DEFAULT_ANSWERS_PATH})",
@@ -87,7 +93,12 @@ def main(argv=None):
             write_comparison_csv(args.csv, rows)
         return
     if args.top_openers:
-        rows = build_top_opener_rows(args.top_openers, allowed_guesses, possible_answers)
+        rows = build_top_opener_rows(
+            args.top_openers,
+            allowed_guesses,
+            possible_answers,
+            rank_by=args.rank_by,
+        )
         print_comparison_report(rows)
         if args.csv:
             write_comparison_csv(args.csv, rows)
@@ -123,10 +134,25 @@ def build_comparison_rows(first_guesses, allowed_guesses, possible_answers):
     return tuple(rows)
 
 
-def build_top_opener_rows(limit, allowed_guesses, possible_answers):
+def build_top_opener_rows(limit, allowed_guesses, possible_answers, rank_by="average"):
     rows = build_comparison_rows(allowed_guesses, allowed_guesses, possible_answers)
-    ranked_rows = sorted(rows, key=lambda row: (float(row["average"]), row["first_guess"]))
+    ranked_rows = sorted(rows, key=_rank_key(rank_by))
     return tuple(ranked_rows[:limit])
+
+
+def _rank_key(rank_by):
+    if rank_by == "average":
+        return lambda row: (float(row["average"]), row["first_guess"])
+    if rank_by == "risk":
+        return lambda row: (row["risk_score"], float(row["average"]), row["first_guess"])
+    if rank_by == "balanced":
+        return lambda row: (
+            row["risk_score"],
+            float(row["average"]),
+            -row["solved_3_or_less"],
+            row["first_guess"],
+        )
+    raise ValueError(f"Unsupported rank method: {rank_by}")
 
 
 def build_comparison_row(first_guess, result):
