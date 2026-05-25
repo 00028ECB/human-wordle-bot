@@ -6,6 +6,7 @@ from pathlib import Path
 
 from src.wordle_lab.__main__ import (
     CSV_COLUMNS,
+    build_comparison_rows,
     build_comparison_row,
     build_parser,
     build_top_opener_rows,
@@ -46,6 +47,23 @@ class CliTests(unittest.TestCase):
         args = build_parser().parse_args(["--top-openers", "25", "--rank-by", "risk"])
 
         self.assertEqual(args.rank_by, "risk")
+
+    def test_parser_accepts_opener_pool(self):
+        args = build_parser().parse_args(
+            ["--top-openers", "25", "--opener-pool", "answers"]
+        )
+
+        self.assertEqual(args.opener_pool, "answers")
+
+    def test_parser_accepts_limit_openers(self):
+        args = build_parser().parse_args(["--top-openers", "25", "--limit-openers", "100"])
+
+        self.assertEqual(args.limit_openers, 100)
+
+    def test_parser_defaults_opener_pool_to_allowed(self):
+        args = build_parser().parse_args(["--top-openers", "25"])
+
+        self.assertEqual(args.opener_pool, "allowed")
 
     def test_parser_defaults_rank_by_to_average(self):
         args = build_parser().parse_args(["--top-openers", "25"])
@@ -166,8 +184,10 @@ class CliTests(unittest.TestCase):
 
         report = output.getvalue()
         lines = report.strip().splitlines()
-        self.assertEqual(len(lines), 4)
+        self.assertEqual(len(lines), 6)
         self.assertIn("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail  Risk", report)
+        self.assertIn("Elapsed seconds:", report)
+        self.assertIn("Average seconds per opener:", report)
 
     def test_format_comparison_row_includes_summary_counts(self):
         words = ("raise", "crane", "slate")
@@ -192,7 +212,7 @@ class CliTests(unittest.TestCase):
     def test_build_top_opener_rows_limits_and_sorts_by_average_by_default(self):
         words = ("raise", "crane", "slate")
 
-        rows = build_top_opener_rows(2, words, words)
+        rows = build_top_opener_rows(2, words, words, words)
 
         self.assertEqual(len(rows), 2)
         self.assertLessEqual(float(rows[0]["average"]), float(rows[1]["average"]))
@@ -200,7 +220,7 @@ class CliTests(unittest.TestCase):
     def test_build_top_opener_rows_can_rank_by_risk(self):
         words = ("raise", "crane", "slate")
 
-        rows = build_top_opener_rows(3, words, words, rank_by="risk")
+        rows = build_top_opener_rows(3, words, words, words, rank_by="risk")
 
         risk_scores = [row["risk_score"] for row in rows]
         self.assertEqual(risk_scores, sorted(risk_scores))
@@ -208,13 +228,49 @@ class CliTests(unittest.TestCase):
     def test_build_top_opener_rows_can_rank_balanced(self):
         words = ("raise", "crane", "slate")
 
-        rows = build_top_opener_rows(3, words, words, rank_by="balanced")
+        rows = build_top_opener_rows(3, words, words, words, rank_by="balanced")
 
         ranking_values = [
             (row["risk_score"], float(row["average"]), -row["solved_3_or_less"])
             for row in rows
         ]
         self.assertEqual(ranking_values, sorted(ranking_values))
+
+    def test_build_top_opener_rows_uses_selected_opener_pool(self):
+        allowed_words = ("raise", "crane", "slate")
+        answer_words = ("raise", "crane")
+
+        rows = build_top_opener_rows(3, answer_words, allowed_words, answer_words)
+
+        first_guesses = {row["first_guess"] for row in rows}
+        self.assertEqual(first_guesses, {"raise", "crane"})
+
+    def test_build_top_opener_rows_can_show_progress(self):
+        words = ("raise", "crane", "slate")
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            build_top_opener_rows(
+                2,
+                words,
+                words,
+                words,
+                show_progress=True,
+                progress_every=2,
+            )
+
+        self.assertIn("Tested 2/3 openers...", output.getvalue())
+
+    def test_fast_top_opener_rows_match_compare_rows(self):
+        words = ("raise", "crane", "slate")
+
+        top_rows = build_top_opener_rows(3, words, words, words)
+        compare_rows = {
+            row["first_guess"]: row for row in build_comparison_rows(words, words, words)
+        }
+
+        for row in top_rows:
+            self.assertEqual(row, compare_rows[row["first_guess"]])
 
     def test_write_comparison_csv_creates_parent_folder(self):
         rows = (
@@ -330,6 +386,10 @@ class CliTests(unittest.TestCase):
     def test_top_openers_requires_positive_limit(self):
         with self.assertRaises(SystemExit):
             main(["--top-openers", "0"])
+
+    def test_limit_openers_requires_positive_limit(self):
+        with self.assertRaises(SystemExit):
+            main(["--top-openers", "2", "--limit-openers", "0"])
 
 
 if __name__ == "__main__":
