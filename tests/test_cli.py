@@ -8,6 +8,7 @@ from src.wordle_lab.__main__ import (
     CSV_COLUMNS,
     build_comparison_row,
     build_parser,
+    build_top_opener_rows,
     format_comparison_row,
     main,
     write_comparison_csv,
@@ -30,6 +31,11 @@ class CliTests(unittest.TestCase):
         args = build_parser().parse_args(["--compare", "raise", "slate", "crane"])
 
         self.assertEqual(args.compare, ["raise", "slate", "crane"])
+
+    def test_parser_accepts_top_openers_limit(self):
+        args = build_parser().parse_args(["--top-openers", "25"])
+
+        self.assertEqual(args.top_openers, 25)
 
     def test_parser_accepts_csv_path(self):
         args = build_parser().parse_args(
@@ -84,6 +90,32 @@ class CliTests(unittest.TestCase):
         self.assertIn("raise", report)
         self.assertIn("slate", report)
 
+    def test_main_reports_top_openers_table(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--top-openers",
+                        "3",
+                    ]
+                )
+
+        report = output.getvalue()
+        lines = report.strip().splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertIn("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail", report)
+
     def test_format_comparison_row_includes_summary_counts(self):
         words = ("raise", "crane", "slate")
         result = run_simulation(words, words, first_guess="raise")
@@ -94,6 +126,14 @@ class CliTests(unittest.TestCase):
         self.assertIn("raise", row)
         self.assertIn("3", row)
         self.assertTrue(row.endswith("0"))
+
+    def test_build_top_opener_rows_limits_and_sorts_by_average(self):
+        words = ("raise", "crane", "slate")
+
+        rows = build_top_opener_rows(2, words, words)
+
+        self.assertEqual(len(rows), 2)
+        self.assertLessEqual(float(rows[0]["average"]), float(rows[1]["average"]))
 
     def test_write_comparison_csv_creates_parent_folder(self):
         rows = (
@@ -135,6 +175,37 @@ class CliTests(unittest.TestCase):
         self.assertIn("raise", report)
         self.assertIn("first_guess,tested,solved,average", csv_text)
 
+    def test_main_top_openers_with_csv_writes_file_and_prints_table(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            csv_path = temp_path / "results" / "top_openers.csv"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--top-openers",
+                        "2",
+                        "--csv",
+                        str(csv_path),
+                    ]
+                )
+
+            report = output.getvalue()
+            csv_text = csv_path.read_text(encoding="utf-8")
+
+        self.assertIn("First   Tested  Solved  Avg   <=3   <=4   5s  6s  Fail", report)
+        self.assertEqual(len(csv_text.strip().splitlines()), 3)
+        self.assertIn("first_guess,tested,solved,average", csv_text)
+
     def test_main_uses_custom_word_list_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -169,6 +240,10 @@ class CliTests(unittest.TestCase):
     def test_csv_without_compare_exits(self):
         with self.assertRaises(SystemExit):
             main(["--csv", "results/out.csv"])
+
+    def test_top_openers_requires_positive_limit(self):
+        with self.assertRaises(SystemExit):
+            main(["--top-openers", "0"])
 
 
 if __name__ == "__main__":

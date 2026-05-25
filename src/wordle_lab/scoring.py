@@ -1,12 +1,14 @@
 """Wordle scoring helpers."""
 
 from collections import Counter
+from functools import cache
 
 GREEN = "G"
 YELLOW = "Y"
 GRAY = "."
 
 
+@cache
 def score_guess(guess, answer):
     """Return Wordle feedback for a guess as a string of G, Y, and dots."""
     _validate_word_pair(guess, answer)

@@ -40,6 +40,12 @@ def build_parser():
         nargs="+",
         help="compare multiple first guesses",
     )
+    mode.add_argument(
+        "--top-openers",
+        type=int,
+        metavar="N",
+        help="rank every allowed guess and show the top N openers",
+    )
     parser.add_argument(
         "--csv",
         help="write compare results to a CSV file",
@@ -60,8 +66,10 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.csv and not args.compare:
-        raise SystemExit("--csv can only be used with --compare")
+    if args.csv and not (args.compare or args.top_openers):
+        raise SystemExit("--csv can only be used with --compare or --top-openers")
+    if args.top_openers is not None and args.top_openers < 1:
+        raise SystemExit("--top-openers must be at least 1")
 
     try:
         allowed_guesses, possible_answers = load_word_lists(
@@ -73,6 +81,12 @@ def main(argv=None):
 
     if args.compare:
         rows = build_comparison_rows(args.compare, allowed_guesses, possible_answers)
+        print_comparison_report(rows)
+        if args.csv:
+            write_comparison_csv(args.csv, rows)
+        return
+    if args.top_openers:
+        rows = build_top_opener_rows(args.top_openers, allowed_guesses, possible_answers)
         print_comparison_report(rows)
         if args.csv:
             write_comparison_csv(args.csv, rows)
@@ -106,6 +120,12 @@ def build_comparison_rows(first_guesses, allowed_guesses, possible_answers):
         )
         rows.append(build_comparison_row(normalized_first_guess, result))
     return tuple(rows)
+
+
+def build_top_opener_rows(limit, allowed_guesses, possible_answers):
+    rows = build_comparison_rows(allowed_guesses, allowed_guesses, possible_answers)
+    ranked_rows = sorted(rows, key=lambda row: (float(row["average"]), row["first_guess"]))
+    return tuple(ranked_rows[:limit])
 
 
 def build_comparison_row(first_guess, result):
