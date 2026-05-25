@@ -47,6 +47,11 @@ def build_parser():
         metavar="N",
         help="rank every allowed guess and show the top N openers",
     )
+    mode.add_argument(
+        "--stats",
+        action="store_true",
+        help="show word list statistics",
+    )
     parser.add_argument(
         "--csv",
         help="write compare results to a CSV file",
@@ -86,6 +91,9 @@ def main(argv=None):
     except (FileNotFoundError, ValueError) as error:
         parser.error(str(error))
 
+    if args.stats:
+        print_stats_report(allowed_guesses, possible_answers)
+        return
     if args.compare:
         rows = build_comparison_rows(args.compare, allowed_guesses, possible_answers)
         print_comparison_report(rows)
@@ -119,6 +127,18 @@ def main(argv=None):
     for guess_count in range(1, 7):
         print(f"  {guess_count} guesses: {result.guess_distribution[guess_count]}")
     print(f"  Failed: {result.failed_count}")
+
+
+def print_stats_report(allowed_guesses, possible_answers):
+    answer_words = set(possible_answers)
+    allowed_words = set(allowed_guesses)
+    overlap = answer_words & allowed_words
+    allowed_only = allowed_words - answer_words
+
+    print(f"Answers: {len(possible_answers)}")
+    print(f"Allowed guesses: {len(allowed_guesses)}")
+    print(f"Overlap: {len(overlap)}")
+    print(f"Allowed-only guesses: {len(allowed_only)}")
 
 
 def build_comparison_rows(first_guesses, allowed_guesses, possible_answers):

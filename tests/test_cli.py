@@ -37,6 +37,11 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.top_openers, 25)
 
+    def test_parser_accepts_stats_mode(self):
+        args = build_parser().parse_args(["--stats"])
+
+        self.assertTrue(args.stats)
+
     def test_parser_accepts_rank_by(self):
         args = build_parser().parse_args(["--top-openers", "25", "--rank-by", "risk"])
 
@@ -88,6 +93,44 @@ class CliTests(unittest.TestCase):
         self.assertIn("  1 guesses:", report)
         self.assertIn("  6 guesses:", report)
         self.assertIn("  Failed:", report)
+
+    def test_main_reports_stats(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            main(["--stats"])
+
+        report = output.getvalue()
+        self.assertIn("Answers: 254", report)
+        self.assertIn("Allowed guesses: 1542", report)
+        self.assertIn("Overlap: 254", report)
+        self.assertIn("Allowed-only guesses: 1288", report)
+
+    def test_main_reports_stats_for_custom_word_lists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            answers_path.write_text("raise\nslate\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--stats",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("Answers: 2", report)
+        self.assertIn("Allowed guesses: 3", report)
+        self.assertIn("Overlap: 2", report)
+        self.assertIn("Allowed-only guesses: 1", report)
 
     def test_main_reports_comparison_table(self):
         output = io.StringIO()
