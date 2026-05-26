@@ -8,6 +8,7 @@ from src.wordle_lab.__main__ import (
     CSV_COLUMNS,
     SECOND_GUESS_COLUMNS,
     STRATEGY_COLUMNS,
+    TUNE_BRANCH_COLUMNS,
     TUNE_PATTERN_COLUMNS,
     WORST_GAME_COLUMNS,
     apply_second_guess_overrides,
@@ -20,6 +21,8 @@ from src.wordle_lab.__main__ import (
     build_worst_pattern_rows,
     build_strategy_row,
     build_top_opener_rows,
+    build_tune_branch_result,
+    build_tune_branch_rows,
     build_tune_pattern_result,
     build_tune_pattern_rows,
     bucket_probe_rank,
@@ -37,6 +40,7 @@ from src.wordle_lab.__main__ import (
     write_second_guess_csv,
     write_comparison_csv,
     write_strategy_csv,
+    write_tune_branch_csv,
     write_tune_pattern_csv,
 )
 from src.wordle_lab.simulator import GameResult, run_simulation
@@ -82,6 +86,13 @@ class CliTests(unittest.TestCase):
         args = build_parser().parse_args(["--tune-pattern", "slate", "....Y"])
 
         self.assertEqual(args.tune_pattern, ["slate", "....Y"])
+
+    def test_parser_accepts_tune_branch(self):
+        args = build_parser().parse_args(
+            ["--tune-branch", "slate", "....Y", "rocky", "Y...."]
+        )
+
+        self.assertEqual(args.tune_branch, ["slate", "....Y", "rocky", "Y...."])
 
     def test_parser_accepts_top_for_tune_pattern(self):
         args = build_parser().parse_args(
@@ -575,6 +586,40 @@ class CliTests(unittest.TestCase):
         self.assertIn("Pattern  Second  Candidates", report)
         self.assertIn("Worst games:", report)
         self.assertIn("answer  guesses  path", report)
+
+    def test_main_reports_tune_branch_for_custom_word_lists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--tune-branch",
+                        "slate",
+                        "GGGGG",
+                        "slate",
+                        "GGGGG",
+                        "--strategy",
+                        "second-map-bucket",
+                        "--second-guess-pool",
+                        "answers",
+                        "--top",
+                        "2",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("FirstPat  Second  SecondPat", report)
+        self.assertIn("GGGGG", report)
 
     def test_main_strategy_show_worst_prints_worst_games(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1123,6 +1168,61 @@ class CliTests(unittest.TestCase):
                 second_guess="crane",
             )
 
+    def test_build_tune_branch_rows_ranks_third_guesses(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        rows = build_tune_branch_rows(
+            "slate",
+            "GGGGG",
+            "slate",
+            "GGGGG",
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            third_guess_pool=answer_words,
+            top=2,
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["first_pattern"], "GGGGG")
+        self.assertEqual(rows[0]["second_pattern"], "GGGGG")
+        self.assertIn(rows[0]["third_guess"], answer_words)
+
+    def test_build_tune_branch_result_with_third_returns_one_row_and_games(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        rows, games = build_tune_branch_result(
+            "slate",
+            "GGGGG",
+            "slate",
+            "GGGGG",
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            third_guess_pool=answer_words,
+            third_guess="slate",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["third_guess"], "slate")
+        self.assertEqual(len(games), 1)
+
+    def test_build_tune_branch_result_rejects_third_not_in_pool(self):
+        with self.assertRaises(ValueError):
+            build_tune_branch_result(
+                "slate",
+                "GGGGG",
+                "slate",
+                "GGGGG",
+                "second-map-bucket",
+                ("slate", "crane"),
+                ("slate",),
+                third_guess_pool=("slate",),
+                third_guess="crane",
+            )
+
     def test_build_tune_pattern_rows_rejects_invalid_pattern(self):
         with self.assertRaises(ValueError):
             build_tune_pattern_rows(
@@ -1401,6 +1501,45 @@ class CliTests(unittest.TestCase):
         self.assertIn("Pattern  Second  Candidates", report)
         self.assertIn("pattern,second_guess,candidates", csv_text)
 
+    def test_main_tune_branch_with_csv_writes_file_and_prints_table(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            csv_path = temp_path / "results" / "tune_branch.csv"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--tune-branch",
+                        "slate",
+                        "GGGGG",
+                        "slate",
+                        "GGGGG",
+                        "--strategy",
+                        "second-map-bucket",
+                        "--second-guess-pool",
+                        "answers",
+                        "--top",
+                        "2",
+                        "--csv",
+                        str(csv_path),
+                    ]
+                )
+
+            report = output.getvalue()
+            csv_text = csv_path.read_text(encoding="utf-8")
+
+        self.assertIn("FirstPat  Second  SecondPat", report)
+        self.assertIn("first_pattern,second_guess,second_pattern,third_guess", csv_text)
+
     def test_main_strategy_with_csv_and_show_worst_writes_companion_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -1479,6 +1618,34 @@ class CliTests(unittest.TestCase):
 
         self.assertIn(",".join(TUNE_PATTERN_COLUMNS), csv_text)
         self.assertIn("GGGGG,slate,1", csv_text)
+
+    def test_write_tune_branch_csv_creates_parent_folder(self):
+        rows = (
+            {
+                "first_pattern": "GGGGG",
+                "second_guess": "slate",
+                "second_pattern": "GGGGG",
+                "third_guess": "slate",
+                "candidates": 1,
+                "average": "1.00",
+                "solved_3_or_less": 1,
+                "solved_4_or_less": 1,
+                "fives": 0,
+                "sixes": 0,
+                "failed": 0,
+                "risk_score": 0,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "results" / "branch.csv"
+
+            write_tune_branch_csv(path, rows)
+
+            csv_text = path.read_text(encoding="utf-8")
+
+        self.assertIn(",".join(TUNE_BRANCH_COLUMNS), csv_text)
+        self.assertIn("GGGGG,slate,GGGGG,slate,1", csv_text)
 
     def test_main_uses_custom_word_list_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:

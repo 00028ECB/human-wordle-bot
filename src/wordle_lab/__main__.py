@@ -1550,6 +1550,17 @@ def write_tune_pattern_csv(path, rows):
         writer.writerows(rows)
 
 
+def write_tune_branch_csv(path, rows):
+    csv_path = Path(path)
+    if csv_path.parent != Path("."):
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=TUNE_BRANCH_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def worst_csv_path(path):
     csv_path = Path(path)
     return csv_path.with_name(f"{csv_path.stem}_worst{csv_path.suffix}")
