@@ -73,6 +73,21 @@ TUNE_PATTERN_COLUMNS = (
     "risk_score",
 )
 
+TUNE_BRANCH_COLUMNS = (
+    "first_pattern",
+    "second_guess",
+    "second_pattern",
+    "third_guess",
+    "candidates",
+    "average",
+    "solved_3_or_less",
+    "solved_4_or_less",
+    "fives",
+    "sixes",
+    "failed",
+    "risk_score",
+)
+
 SECOND_GUESS_OVERRIDES = {
     ("slate", ".....", "answers"): "frond",
     ("slate", "...Y.", "answers"): "tough",
@@ -125,6 +140,12 @@ def build_parser():
         nargs=2,
         metavar=("FIRST", "PATTERN"),
         help="rank second guesses for one first-guess feedback pattern",
+    )
+    mode.add_argument(
+        "--tune-branch",
+        nargs=4,
+        metavar=("FIRST", "FIRST_PATTERN", "SECOND", "SECOND_PATTERN"),
+        help="rank third guesses for one first-guess and second-guess branch",
     )
     parser.add_argument(
         "--csv",
@@ -226,10 +247,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.csv and not (
         args.compare or args.top_openers or args.second_guess_map or args.strategy
-        or args.compare_strategies or args.tune_pattern
+        or args.compare_strategies or args.tune_pattern or args.tune_branch
     ):
         raise SystemExit(
-            "--csv can only be used with --compare, --top-openers, --second-guess-map, --strategy, --compare-strategies, or --tune-pattern"
+            "--csv can only be used with --compare, --top-openers, --second-guess-map, --strategy, --compare-strategies, --tune-pattern, or --tune-branch"
         )
     if args.top_openers is not None and args.top_openers < 1:
         raise SystemExit("--top-openers must be at least 1")
@@ -291,6 +312,33 @@ def main(argv=None):
             print_worst_games(build_worst_game_rows(pattern_games, pattern_worst_limit))
         if args.csv:
             write_tune_pattern_csv(args.csv, rows)
+        return
+    if args.tune_branch:
+        first_guess, first_pattern, second_guess, second_pattern = args.tune_branch
+        third_guess_pool = (
+            allowed_guesses if args.second_guess_pool == "allowed" else possible_answers
+        )
+        try:
+            rows, branch_games = build_tune_branch_result(
+                first_guess.lower(),
+                first_pattern,
+                second_guess.lower(),
+                second_pattern,
+                args.strategy or "second-map-bucket",
+                allowed_guesses,
+                possible_answers,
+                third_guess_pool,
+                top=args.top,
+                third_guess=args.second.lower() if args.second else None,
+                trap_threshold=args.trap_threshold,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+        print_tune_branch_report(rows)
+        if args.show_worst and args.second:
+            print_worst_games(build_worst_game_rows(branch_games, args.show_worst))
+        if args.csv:
+            write_tune_branch_csv(args.csv, rows)
         return
     if args.strategy:
         try:
@@ -598,6 +646,204 @@ def print_tune_pattern_report(rows):
         print(
             f"{row['pattern']:<8} "
             f"{row['second_guess']:<7} "
+            f"{row['candidates']:<11} "
+            f"{row['average']:<5} "
+            f"{row['solved_3_or_less']:<5} "
+            f"{row['solved_4_or_less']:<5} "
+            f"{row['fives']:<3} "
+            f"{row['sixes']:<3} "
+            f"{row['failed']:<5} "
+            f"{row['risk_score']}"
+        )
+
+
+def build_tune_branch_result(
+    first_guess,
+    first_pattern,
+    second_guess,
+    second_pattern,
+    strategy,
+    allowed_guesses,
+    possible_answers,
+    third_guess_pool,
+    top=25,
+    third_guess=None,
+    trap_threshold=2,
+):
+    validate_tune_pattern(first_guess, first_pattern, strategy, allowed_guesses)
+    if second_guess not in allowed_guesses:
+        raise ValueError(f"Second guess {second_guess!r} is not in the allowed guess list.")
+    if len(second_pattern) != len(second_guess) or any(mark not in "GY." for mark in second_pattern):
+        raise ValueError("Second pattern must use G, Y, and . with the same length as the second guess.")
+    if third_guess is not None and third_guess not in third_guess_pool:
+        raise ValueError(f"Third guess {third_guess!r} is not in the selected third-guess pool.")
+
+    candidates = tuple(
+        answer
+        for answer in possible_answers
+        if score_guess(first_guess, answer) == first_pattern
+        and score_guess(second_guess, answer) == second_pattern
+    )
+    if not candidates:
+        raise ValueError(
+            f"No answers match branch {first_guess!r} {first_pattern!r}, "
+            f"{second_guess!r} {second_pattern!r}."
+        )
+
+    rows = []
+    selected_games = ()
+    selected_third_guesses = (third_guess,) if third_guess else third_guess_pool
+    for current_third_guess in selected_third_guesses:
+        games = tuple(
+            play_tuned_branch_game(
+                answer,
+                allowed_guesses,
+                candidates,
+                first_guess,
+                first_pattern,
+                second_guess,
+                second_pattern,
+                current_third_guess,
+                strategy,
+                third_guess_pool,
+                trap_threshold,
+            )
+            for answer in candidates
+        )
+        if third_guess:
+            selected_games = games
+        rows.append(
+            build_tune_branch_row(
+                first_pattern,
+                second_guess,
+                second_pattern,
+                current_third_guess,
+                len(candidates),
+                games,
+            )
+        )
+
+    ranked_rows = sorted(
+        rows,
+        key=lambda row: (
+            row["risk_score"],
+            float(row["average"]),
+            -row["solved_4_or_less"],
+            row["third_guess"],
+        ),
+    )
+    return tuple(ranked_rows[:top]), selected_games
+
+
+def build_tune_branch_rows(
+    first_guess,
+    first_pattern,
+    second_guess,
+    second_pattern,
+    strategy,
+    allowed_guesses,
+    possible_answers,
+    third_guess_pool,
+    top=25,
+    trap_threshold=2,
+):
+    rows, _games = build_tune_branch_result(
+        first_guess,
+        first_pattern,
+        second_guess,
+        second_pattern,
+        strategy,
+        allowed_guesses,
+        possible_answers,
+        third_guess_pool,
+        top=top,
+        trap_threshold=trap_threshold,
+    )
+    return rows
+
+
+def play_tuned_branch_game(
+    answer,
+    allowed_guesses,
+    candidates,
+    first_guess,
+    first_pattern,
+    second_guess,
+    second_pattern,
+    third_guess,
+    strategy,
+    probe_pool,
+    trap_threshold,
+):
+    guesses = [first_guess]
+    if is_solved(first_pattern):
+        return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
+
+    guesses.append(second_guess)
+    if is_solved(second_pattern):
+        return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
+
+    feedback = score_guess(third_guess, answer)
+    guesses.append(third_guess)
+    if is_solved(feedback):
+        return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
+
+    remaining_candidates = filter_candidates_by_feedback(candidates, third_guess, feedback)
+    while remaining_candidates:
+        next_guess = choose_later_strategy_guess(
+            strategy,
+            remaining_candidates,
+            guesses,
+            allowed_guesses,
+            probe_pool,
+            trap_threshold,
+        )
+        feedback = score_guess(next_guess, answer)
+        guesses.append(next_guess)
+        if is_solved(feedback):
+            return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
+        remaining_candidates = filter_candidates_by_feedback(
+            remaining_candidates,
+            next_guess,
+            feedback,
+        )
+
+    return GameResult(answer=answer, guesses=tuple(guesses), solved=False)
+
+
+def build_tune_branch_row(
+    first_pattern,
+    second_guess,
+    second_pattern,
+    third_guess,
+    candidate_count,
+    games,
+):
+    summary = build_summary_row_from_games(third_guess, games)
+    return {
+        "first_pattern": first_pattern,
+        "second_guess": second_guess,
+        "second_pattern": second_pattern,
+        "third_guess": third_guess,
+        "candidates": candidate_count,
+        "average": summary["average"],
+        "solved_3_or_less": summary["solved_3_or_less"],
+        "solved_4_or_less": summary["solved_4_or_less"],
+        "fives": summary["fives"],
+        "sixes": summary["sixes"],
+        "failed": summary["failed"],
+        "risk_score": summary["risk_score"],
+    }
+
+
+def print_tune_branch_report(rows):
+    print("FirstPat  Second  SecondPat  Third  Candidates  Avg   <=3   <=4   5s  6s  Fail  Risk")
+    for row in rows:
+        print(
+            f"{row['first_pattern']:<8} "
+            f"{row['second_guess']:<7} "
+            f"{row['second_pattern']:<9} "
+            f"{row['third_guess']:<6} "
             f"{row['candidates']:<11} "
             f"{row['average']:<5} "
             f"{row['solved_3_or_less']:<5} "
