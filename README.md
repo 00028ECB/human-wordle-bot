@@ -107,9 +107,12 @@ python -m src.wordle_lab --strategy second-map-bucket --first slate --second-gue
 python -m src.wordle_lab --strategy second-map-hybrid --first slate --second-guess-pool answers --trap-threshold 3
 python -m src.wordle_lab --strategy second-map --first slate --second-guess-pool answers --show-worst 25
 python -m src.wordle_lab --strategy second-map-bucket --first slate --second-guess-pool answers --worst-patterns 20
+python -m src.wordle_lab --strategy second-map-bucket --first slate --second-guess-pool answers --answer-weighting simple
 python -m src.wordle_lab --tune-pattern slate ....Y --strategy second-map-bucket --second-guess-pool answers --top 25
+python -m src.wordle_lab --tune-pattern slate ....Y --strategy second-map-bucket --second-guess-pool answers --top 25 --branch-summary
 python -m src.wordle_lab --tune-pattern slate ....Y --strategy second-map-bucket --second-guess-pool answers --second rocky --show-worst 25
 python -m src.wordle_lab --tune-branch slate ....Y rocky Y.... --strategy second-map-bucket --second-guess-pool answers --top 25
+python -m src.wordle_lab --tune-path slate ....Y rocky Y.... fiend ..Y.. --strategy second-map-bucket --second-guess-pool answers --top 25
 python -m src.wordle_lab --strategy second-map --first slate --second-guess-pool answers --csv results/strategy_slate.csv
 python -m src.wordle_lab --compare-strategies --csv results/strategy_leaderboard.csv
 ```
@@ -130,9 +133,15 @@ Use `--worst-patterns` to group solved games by the first feedback pattern and r
 
 Use `--tune-pattern FIRST PATTERN` to focus on one first-feedback bucket and rank possible second guesses. The ranking prefers lower risk, then lower average guesses, then more solves in four or fewer guesses. Add `--csv` to save the tuning table.
 
+Add `--branch-summary` to tune-pattern output to show whether each second guess creates an ugly second-feedback branch.
+
 Add `--second WORD` to evaluate one second guess for that pattern. Pair it with `--show-worst N` or `--show-pattern-worst N` to inspect the hardest answers inside that first-feedback bucket.
 
 Use `--tune-branch FIRST FIRST_PATTERN SECOND SECOND_PATTERN` to tune third guesses for one exact branch after the first two guesses. Add `--second WORD` to inspect one specific third guess and pair it with `--show-worst N` for the hardest games in that branch.
+
+Use `--tune-path` for deeper branches. Give alternating guess/pattern pairs ending with the latest feedback pattern, and Wordle Lab will tune the next guess from that position. Add `--branch-summary` to show the worst next-feedback branch for each candidate next guess.
+
+Use `--answer-weighting simple` to prefer more Wordle-like answer candidates when the strategy is choosing among remaining possible answers. The default is `--answer-weighting off`, which preserves the original first-remaining-candidate behavior.
 
 Built-in second-guess overrides can pin a tuned answer for a specific first word, feedback pattern, and pool. Use `--no-overrides` to compare against the unmodified second-map recommendation.
 

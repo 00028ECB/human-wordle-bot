@@ -73,6 +73,13 @@ TUNE_PATTERN_COLUMNS = (
     "risk_score",
 )
 
+TUNE_PATTERN_BRANCH_COLUMNS = TUNE_PATTERN_COLUMNS + (
+    "worst_branch_pattern",
+    "worst_branch_candidates",
+    "worst_branch_fives",
+    "worst_branch_risk",
+)
+
 TUNE_BRANCH_COLUMNS = (
     "first_pattern",
     "second_guess",
@@ -86,6 +93,25 @@ TUNE_BRANCH_COLUMNS = (
     "sixes",
     "failed",
     "risk_score",
+)
+
+TUNE_PATH_COLUMNS = (
+    "path",
+    "next_guess",
+    "candidates",
+    "average",
+    "solved_4_or_less",
+    "fives",
+    "sixes",
+    "failed",
+    "risk_score",
+)
+
+TUNE_PATH_BRANCH_COLUMNS = TUNE_PATH_COLUMNS + (
+    "worst_branch_pattern",
+    "worst_branch_candidates",
+    "worst_branch_fives",
+    "worst_branch_risk",
 )
 
 SECOND_GUESS_OVERRIDES = {
@@ -146,6 +172,12 @@ def build_parser():
         nargs=4,
         metavar=("FIRST", "FIRST_PATTERN", "SECOND", "SECOND_PATTERN"),
         help="rank third guesses for one first-guess and second-guess branch",
+    )
+    mode.add_argument(
+        "--tune-path",
+        nargs="+",
+        metavar="STEP",
+        help="rank the next guess after an arbitrary guess/pattern path",
     )
     parser.add_argument(
         "--csv",
@@ -226,6 +258,22 @@ def build_parser():
         help="number of rows for --tune-pattern (default: 25)",
     )
     parser.add_argument(
+        "--answer-weighting",
+        choices=("off", "simple"),
+        default="off",
+        help="answer candidate weighting mode for strategy solving (default: off)",
+    )
+    parser.add_argument(
+        "--show-weighting-changes",
+        action="store_true",
+        help="show where --answer-weighting simple changes answer-candidate choices",
+    )
+    parser.add_argument(
+        "--branch-summary",
+        action="store_true",
+        help="include worst branch summary columns for --tune-pattern",
+    )
+    parser.add_argument(
         "--second",
         help="evaluate one second guess for --tune-pattern",
     )
@@ -248,9 +296,10 @@ def main(argv=None):
     if args.csv and not (
         args.compare or args.top_openers or args.second_guess_map or args.strategy
         or args.compare_strategies or args.tune_pattern or args.tune_branch
+        or args.tune_path
     ):
         raise SystemExit(
-            "--csv can only be used with --compare, --top-openers, --second-guess-map, --strategy, --compare-strategies, --tune-pattern, or --tune-branch"
+            "--csv can only be used with --compare, --top-openers, --second-guess-map, --strategy, --compare-strategies, --tune-pattern, --tune-branch, or --tune-path"
         )
     if args.top_openers is not None and args.top_openers < 1:
         raise SystemExit("--top-openers must be at least 1")
@@ -282,6 +331,7 @@ def main(argv=None):
             allowed_guesses,
             possible_answers,
             use_overrides=not args.no_overrides,
+            answer_weighting=args.answer_weighting,
         )
         print_strategy_report(rows)
         if args.csv:
@@ -303,10 +353,12 @@ def main(argv=None):
                 top=args.top,
                 second_guess=args.second.lower() if args.second else None,
                 trap_threshold=args.trap_threshold,
+                answer_weighting=args.answer_weighting,
+                branch_summary=args.branch_summary,
             )
         except ValueError as error:
             parser.error(str(error))
-        print_tune_pattern_report(rows)
+        print_tune_pattern_report(rows, branch_summary=args.branch_summary)
         pattern_worst_limit = args.show_pattern_worst or args.show_worst
         if pattern_worst_limit and args.second:
             print_worst_games(build_worst_game_rows(pattern_games, pattern_worst_limit))
@@ -331,6 +383,7 @@ def main(argv=None):
                 top=args.top,
                 third_guess=args.second.lower() if args.second else None,
                 trap_threshold=args.trap_threshold,
+                answer_weighting=args.answer_weighting,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -340,7 +393,33 @@ def main(argv=None):
         if args.csv:
             write_tune_branch_csv(args.csv, rows)
         return
+    if args.tune_path:
+        next_guess_pool = (
+            allowed_guesses if args.second_guess_pool == "allowed" else possible_answers
+        )
+        try:
+            rows, path_games = build_tune_path_result(
+                args.tune_path,
+                args.strategy or "second-map-bucket",
+                allowed_guesses,
+                possible_answers,
+                next_guess_pool,
+                top=args.top,
+                next_guess=args.second.lower() if args.second else None,
+                trap_threshold=args.trap_threshold,
+                answer_weighting=args.answer_weighting,
+                branch_summary=args.branch_summary,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+        print_tune_path_report(rows, branch_summary=args.branch_summary)
+        if args.show_worst:
+            print_worst_games(build_worst_game_rows(path_games, args.show_worst))
+        if args.csv:
+            write_tune_path_csv(args.csv, rows)
+        return
     if args.strategy:
+        weighting_changes = []
         try:
             row, games = build_strategy_result(
                 args.strategy,
@@ -350,10 +429,14 @@ def main(argv=None):
                 second_guess_pool_name=args.second_guess_pool,
                 trap_threshold=args.trap_threshold,
                 use_overrides=not args.no_overrides,
+                answer_weighting=args.answer_weighting,
+                weighting_changes=weighting_changes if args.show_weighting_changes else None,
             )
         except ValueError as error:
             parser.error(str(error))
         print_strategy_report((row,))
+        if args.show_weighting_changes:
+            print_weighting_changes(weighting_changes, enabled=args.answer_weighting == "simple")
         worst_rows = ()
         if args.worst_patterns is not None:
             pattern_limit = None if args.worst_patterns == -1 else args.worst_patterns
@@ -458,6 +541,8 @@ def build_tune_pattern_rows(
     second_guess_pool,
     top=25,
     trap_threshold=2,
+    answer_weighting="off",
+    branch_summary=False,
 ):
     rows, _games = build_tune_pattern_result(
         first_guess,
@@ -468,6 +553,8 @@ def build_tune_pattern_rows(
         second_guess_pool,
         top=top,
         trap_threshold=trap_threshold,
+        answer_weighting=answer_weighting,
+        branch_summary=branch_summary,
     )
     return rows
 
@@ -482,6 +569,8 @@ def build_tune_pattern_result(
     top=25,
     second_guess=None,
     trap_threshold=2,
+    answer_weighting="off",
+    branch_summary=False,
 ):
     validate_tune_pattern(first_guess, pattern, strategy, allowed_guesses)
     if second_guess is not None and second_guess not in second_guess_pool:
@@ -507,12 +596,22 @@ def build_tune_pattern_result(
                 strategy,
                 second_guess_pool,
                 trap_threshold,
+                answer_weighting,
             )
             for answer in candidates
         )
         if second_guess:
             selected_games = games
-        rows.append(build_tune_pattern_row(pattern, current_second_guess, len(candidates), games))
+        rows.append(
+            build_tune_pattern_row(
+                pattern,
+                current_second_guess,
+                len(candidates),
+                games,
+                candidates,
+                branch_summary=branch_summary,
+            )
+        )
 
     ranked_rows = sorted(
         rows,
@@ -571,6 +670,7 @@ def play_tuned_pattern_game(
     strategy,
     probe_pool,
     trap_threshold,
+    answer_weighting="off",
 ):
     guesses = [first_guess]
     if is_solved(pattern):
@@ -590,6 +690,7 @@ def play_tuned_pattern_game(
             allowed_guesses,
             probe_pool,
             trap_threshold,
+            answer_weighting,
         )
         feedback = score_guess(next_guess, answer)
         guesses.append(next_guess)
@@ -611,6 +712,7 @@ def choose_later_strategy_guess(
     allowed_guesses,
     probe_pool,
     trap_threshold,
+    answer_weighting="off",
 ):
     return choose_next_guess_with_optional_probe(
         candidates,
@@ -621,12 +723,20 @@ def choose_later_strategy_guess(
         use_bucket_strategy=(strategy == "second-map-bucket"),
         use_hybrid_strategy=(strategy == "second-map-hybrid"),
         trap_threshold=trap_threshold,
+        answer_weighting=answer_weighting,
     )
 
 
-def build_tune_pattern_row(pattern, second_guess, candidate_count, games):
+def build_tune_pattern_row(
+    pattern,
+    second_guess,
+    candidate_count,
+    games,
+    candidates=(),
+    branch_summary=False,
+):
     summary = build_summary_row_from_games(second_guess, games)
-    return {
+    row = {
         "pattern": pattern,
         "second_guess": second_guess,
         "candidates": candidate_count,
@@ -638,12 +748,70 @@ def build_tune_pattern_row(pattern, second_guess, candidate_count, games):
         "failed": summary["failed"],
         "risk_score": summary["risk_score"],
     }
+    if branch_summary:
+        row.update(build_second_feedback_branch_summary(second_guess, candidates, games))
+    return row
 
 
-def print_tune_pattern_report(rows):
-    print("Pattern  Second  Candidates  Avg   <=3   <=4   5s  6s  Fail  Risk")
-    for row in rows:
+def build_second_feedback_branch_summary(second_guess, candidates, games):
+    games_by_answer = {game.answer: game for game in games}
+    grouped_answers = defaultdict(list)
+    for answer in candidates:
+        grouped_answers[score_guess(second_guess, answer)].append(answer)
+
+    if not grouped_answers:
+        return {
+            "worst_branch_pattern": "",
+            "worst_branch_candidates": 0,
+            "worst_branch_fives": 0,
+            "worst_branch_risk": 0,
+        }
+
+    branch_rows = []
+    for branch_pattern, answers in grouped_answers.items():
+        branch_games = [games_by_answer[answer] for answer in answers]
+        fives = sum(1 for game in branch_games if game.solved and game.guess_count == 5)
+        sixes = sum(1 for game in branch_games if game.solved and game.guess_count == 6)
+        failed = sum(1 for game in branch_games if not game.solved)
+        risk = fives * 2 + sixes * 5 + failed * 20
+        average = (
+            sum(game.guess_count for game in branch_games) / len(branch_games)
+            if branch_games
+            else 0
+        )
+        branch_rows.append(
+            {
+                "worst_branch_pattern": branch_pattern,
+                "worst_branch_candidates": len(answers),
+                "worst_branch_fives": fives,
+                "worst_branch_risk": risk,
+                "average": average,
+            }
+        )
+
+    worst_branch = max(
+        branch_rows,
+        key=lambda row: (
+            row["worst_branch_risk"],
+            row["worst_branch_candidates"],
+            row["average"],
+            row["worst_branch_pattern"],
+        ),
+    )
+    del worst_branch["average"]
+    return worst_branch
+
+
+def print_tune_pattern_report(rows, branch_summary=False):
+    if branch_summary:
         print(
+            "Pattern  Second  Candidates  Avg   <=3   <=4   5s  6s  Fail  Risk  "
+            "Worst2  WorstN  Worst5s  WorstRisk"
+        )
+    else:
+        print("Pattern  Second  Candidates  Avg   <=3   <=4   5s  6s  Fail  Risk")
+    for row in rows:
+        line = (
             f"{row['pattern']:<8} "
             f"{row['second_guess']:<7} "
             f"{row['candidates']:<11} "
@@ -655,6 +823,14 @@ def print_tune_pattern_report(rows):
             f"{row['failed']:<5} "
             f"{row['risk_score']}"
         )
+        if branch_summary:
+            line += (
+                f"     {row['worst_branch_pattern']:<7} "
+                f"{row['worst_branch_candidates']:<7} "
+                f"{row['worst_branch_fives']:<8} "
+                f"{row['worst_branch_risk']}"
+            )
+        print(line)
 
 
 def build_tune_branch_result(
@@ -669,6 +845,7 @@ def build_tune_branch_result(
     top=25,
     third_guess=None,
     trap_threshold=2,
+    answer_weighting="off",
 ):
     validate_tune_pattern(first_guess, first_pattern, strategy, allowed_guesses)
     if second_guess not in allowed_guesses:
@@ -707,6 +884,7 @@ def build_tune_branch_result(
                 strategy,
                 third_guess_pool,
                 trap_threshold,
+                answer_weighting,
             )
             for answer in candidates
         )
@@ -746,6 +924,7 @@ def build_tune_branch_rows(
     third_guess_pool,
     top=25,
     trap_threshold=2,
+    answer_weighting="off",
 ):
     rows, _games = build_tune_branch_result(
         first_guess,
@@ -758,6 +937,7 @@ def build_tune_branch_rows(
         third_guess_pool,
         top=top,
         trap_threshold=trap_threshold,
+        answer_weighting=answer_weighting,
     )
     return rows
 
@@ -774,6 +954,7 @@ def play_tuned_branch_game(
     strategy,
     probe_pool,
     trap_threshold,
+    answer_weighting="off",
 ):
     guesses = [first_guess]
     if is_solved(first_pattern):
@@ -797,6 +978,7 @@ def play_tuned_branch_game(
             allowed_guesses,
             probe_pool,
             trap_threshold,
+            answer_weighting,
         )
         feedback = score_guess(next_guess, answer)
         guesses.append(next_guess)
@@ -855,11 +1037,263 @@ def print_tune_branch_report(rows):
         )
 
 
+def build_tune_path_result(
+    path_steps,
+    strategy,
+    allowed_guesses,
+    possible_answers,
+    next_guess_pool,
+    top=25,
+    next_guess=None,
+    trap_threshold=2,
+    answer_weighting="off",
+    branch_summary=False,
+):
+    path_guesses, path_patterns = parse_tune_path(path_steps, allowed_guesses)
+    validate_tune_path_strategy(strategy)
+    if next_guess is not None and next_guess not in next_guess_pool:
+        raise ValueError(f"Next guess {next_guess!r} is not in the selected next-guess pool.")
+
+    candidates = filter_candidates_for_path(possible_answers, path_guesses, path_patterns)
+    if not candidates:
+        raise ValueError("No answers match the supplied tune path.")
+
+    rows = []
+    selected_games = ()
+    selected_next_guesses = (next_guess,) if next_guess else next_guess_pool
+    path_label = format_tune_path_label(path_guesses, path_patterns)
+    for current_next_guess in selected_next_guesses:
+        games = tuple(
+            play_tuned_path_game(
+                answer,
+                allowed_guesses,
+                candidates,
+                path_guesses,
+                current_next_guess,
+                strategy,
+                next_guess_pool,
+                trap_threshold,
+                answer_weighting,
+            )
+            for answer in candidates
+        )
+        if next_guess:
+            selected_games = games
+        rows.append(
+            build_tune_path_row(
+                path_label,
+                current_next_guess,
+                len(candidates),
+                games,
+                candidates,
+                branch_summary=branch_summary,
+            )
+        )
+
+    ranked_rows = sorted(
+        rows,
+        key=lambda row: (
+            row["risk_score"],
+            float(row["average"]),
+            -row["solved_4_or_less"],
+            row["next_guess"],
+        ),
+    )
+    if not selected_games and ranked_rows:
+        best_next_guess = ranked_rows[0]["next_guess"]
+        selected_games = tuple(
+            play_tuned_path_game(
+                answer,
+                allowed_guesses,
+                candidates,
+                path_guesses,
+                best_next_guess,
+                strategy,
+                next_guess_pool,
+                trap_threshold,
+                answer_weighting,
+            )
+            for answer in candidates
+        )
+    return tuple(ranked_rows[:top]), selected_games
+
+
+def build_tune_path_rows(
+    path_steps,
+    strategy,
+    allowed_guesses,
+    possible_answers,
+    next_guess_pool,
+    top=25,
+    trap_threshold=2,
+    answer_weighting="off",
+    branch_summary=False,
+):
+    rows, _games = build_tune_path_result(
+        path_steps,
+        strategy,
+        allowed_guesses,
+        possible_answers,
+        next_guess_pool,
+        top=top,
+        trap_threshold=trap_threshold,
+        answer_weighting=answer_weighting,
+        branch_summary=branch_summary,
+    )
+    return rows
+
+
+def parse_tune_path(path_steps, allowed_guesses):
+    if len(path_steps) < 2:
+        raise ValueError("Tune path must include at least one guess and feedback pattern.")
+    if len(path_steps) % 2 != 0:
+        raise ValueError("Tune path must end with a feedback pattern for the last guess.")
+
+    guesses = tuple(step.lower() for step in path_steps[0::2])
+    patterns = tuple(path_steps[1::2])
+    for guess in guesses:
+        if guess not in allowed_guesses:
+            raise ValueError(f"Guess {guess!r} is not in the allowed guess list.")
+    for guess, pattern in zip(guesses, patterns):
+        if len(pattern) != len(guess) or any(mark not in "GY." for mark in pattern):
+            raise ValueError("Path patterns must use G, Y, and . with the same length as their guess.")
+    return guesses, patterns
+
+
+def validate_tune_path_strategy(strategy):
+    if strategy not in {
+        "baseline",
+        "second-map",
+        "second-map-trap",
+        "second-map-bucket",
+        "second-map-hybrid",
+    }:
+        raise ValueError(f"Unsupported strategy: {strategy}")
+
+
+def filter_candidates_for_path(possible_answers, path_guesses, path_patterns):
+    candidates = tuple(possible_answers)
+    for guess, pattern in zip(path_guesses, path_patterns):
+        candidates = tuple(
+            answer for answer in candidates if score_guess(guess, answer) == pattern
+        )
+    return candidates
+
+
+def format_tune_path_label(path_guesses, path_patterns):
+    parts = []
+    for index, guess in enumerate(path_guesses):
+        parts.append(guess)
+        parts.append(path_patterns[index])
+    return " ".join(parts)
+
+
+def play_tuned_path_game(
+    answer,
+    allowed_guesses,
+    candidates,
+    path_guesses,
+    next_guess,
+    strategy,
+    probe_pool,
+    trap_threshold,
+    answer_weighting="off",
+):
+    guesses = list(path_guesses)
+    feedback = score_guess(next_guess, answer)
+    guesses.append(next_guess)
+    if is_solved(feedback):
+        return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
+
+    remaining_candidates = filter_candidates_by_feedback(candidates, next_guess, feedback)
+    while remaining_candidates:
+        if answer in remaining_candidates and all(
+            candidate in guesses for candidate in remaining_candidates
+        ):
+            return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
+        later_guess = choose_later_strategy_guess(
+            strategy,
+            remaining_candidates,
+            guesses,
+            allowed_guesses,
+            probe_pool,
+            trap_threshold,
+            answer_weighting,
+        )
+        feedback = score_guess(later_guess, answer)
+        guesses.append(later_guess)
+        if is_solved(feedback):
+            return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
+        remaining_candidates = filter_candidates_by_feedback(
+            remaining_candidates,
+            later_guess,
+            feedback,
+        )
+
+    return GameResult(answer=answer, guesses=tuple(guesses), solved=False)
+
+
+def build_tune_path_row(
+    path_label,
+    next_guess,
+    candidate_count,
+    games,
+    candidates=(),
+    branch_summary=False,
+):
+    summary = build_summary_row_from_games(next_guess, games)
+    row = {
+        "path": path_label,
+        "next_guess": next_guess,
+        "candidates": candidate_count,
+        "average": summary["average"],
+        "solved_4_or_less": summary["solved_4_or_less"],
+        "fives": summary["fives"],
+        "sixes": summary["sixes"],
+        "failed": summary["failed"],
+        "risk_score": summary["risk_score"],
+    }
+    if branch_summary:
+        row.update(build_second_feedback_branch_summary(next_guess, candidates, games))
+    return row
+
+
+def print_tune_path_report(rows, branch_summary=False):
+    if branch_summary:
+        print(
+            "Path  Next  Candidates  Avg   <=4   5s  6s  Fail  Risk  "
+            "WorstNext  WorstN  Worst5s  WorstRisk"
+        )
+    else:
+        print("Path  Next  Candidates  Avg   <=4   5s  6s  Fail  Risk")
+    for row in rows:
+        line = (
+            f"{row['path']:<20} "
+            f"{row['next_guess']:<6} "
+            f"{row['candidates']:<11} "
+            f"{row['average']:<5} "
+            f"{row['solved_4_or_less']:<5} "
+            f"{row['fives']:<3} "
+            f"{row['sixes']:<3} "
+            f"{row['failed']:<5} "
+            f"{row['risk_score']}"
+        )
+        if branch_summary:
+            line += (
+                f"     {row['worst_branch_pattern']:<9} "
+                f"{row['worst_branch_candidates']:<7} "
+                f"{row['worst_branch_fives']:<8} "
+                f"{row['worst_branch_risk']}"
+            )
+        print(line)
+
+
 def build_strategy_comparison_rows(
     allowed_guesses,
     possible_answers,
     first_guess="slate",
     use_overrides=True,
+    answer_weighting="off",
 ):
     strategy_specs = (
         ("baseline", "", 2),
@@ -882,6 +1316,7 @@ def build_strategy_comparison_rows(
             second_guess_pool_name=second_guess_pool_name or "allowed",
             trap_threshold=trap_threshold,
             use_overrides=use_overrides,
+            answer_weighting=answer_weighting,
         )
         if strategy == "baseline":
             row = {**row, "second_guess_pool": "-"}
@@ -897,6 +1332,7 @@ def build_strategy_row(
     second_guess_pool_name="allowed",
     trap_threshold=2,
     use_overrides=True,
+    answer_weighting="off",
 ):
     row, _games = build_strategy_result(
         strategy,
@@ -906,6 +1342,7 @@ def build_strategy_row(
         second_guess_pool_name=second_guess_pool_name,
         trap_threshold=trap_threshold,
         use_overrides=use_overrides,
+        answer_weighting=answer_weighting,
     )
     return row
 
@@ -918,23 +1355,40 @@ def build_strategy_result(
     second_guess_pool_name="allowed",
     trap_threshold=2,
     use_overrides=True,
+    answer_weighting="off",
+    weighting_changes=None,
 ):
     if first_guess not in allowed_guesses:
         raise ValueError(f"First guess {first_guess!r} is not in the allowed guess list.")
 
     if strategy == "baseline":
-        result = run_simulation(
-            allowed_guesses=allowed_guesses,
-            possible_answers=possible_answers,
-            first_guess=first_guess,
-        )
-        summary = build_comparison_row(first_guess, result)
+        if answer_weighting == "off":
+            result = run_simulation(
+                allowed_guesses=allowed_guesses,
+                possible_answers=possible_answers,
+                first_guess=first_guess,
+            )
+            summary = build_comparison_row(first_guess, result)
+            games = result.games
+        else:
+            games = tuple(
+                play_baseline_game(
+                    answer,
+                    allowed_guesses,
+                    possible_answers,
+                    first_guess,
+                    answer_weighting,
+                    weighting_changes,
+                )
+                for answer in possible_answers
+            )
+            summary = build_summary_row_from_games(first_guess, games)
         return {
             "strategy": "baseline",
             "first_guess": first_guess,
             "second_guess_pool": "",
             **summary,
-        }, result.games
+        }, games
 
     if strategy in {
         "second-map",
@@ -973,6 +1427,8 @@ def build_strategy_result(
                 use_hybrid_strategy=(strategy == "second-map-hybrid"),
                 trap_threshold=trap_threshold,
                 probe_pool=second_guess_pool,
+                answer_weighting=answer_weighting,
+                weighting_changes=weighting_changes,
             )
             for answer in possible_answers
         )
@@ -998,6 +1454,8 @@ def play_second_map_game(
     use_hybrid_strategy=False,
     trap_threshold=2,
     probe_pool=None,
+    answer_weighting="off",
+    weighting_changes=None,
 ):
     guesses = []
     candidates = tuple(possible_answers)
@@ -1027,7 +1485,45 @@ def play_second_map_game(
             use_bucket_strategy,
             use_hybrid_strategy,
             trap_threshold,
+            answer_weighting,
+            weighting_changes,
+            answer,
+            len(guesses) + 1,
         )
+        feedback = score_guess(next_guess, answer)
+        guesses.append(next_guess)
+        if is_solved(feedback):
+            return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
+        candidates = filter_candidates_by_feedback(candidates, next_guess, feedback)
+
+    return GameResult(answer=answer, guesses=tuple(guesses), solved=False)
+
+
+def play_baseline_game(
+    answer,
+    allowed_guesses,
+    possible_answers,
+    first_guess,
+    answer_weighting="off",
+    weighting_changes=None,
+):
+    guesses = []
+    candidates = tuple(possible_answers)
+
+    while candidates:
+        if guesses:
+            next_guess = choose_answer_candidate(
+                candidates,
+                guesses,
+                allowed_guesses,
+                answer_weighting,
+                weighting_changes,
+                answer,
+                len(guesses) + 1,
+            )
+        else:
+            next_guess = first_guess
+
         feedback = score_guess(next_guess, answer)
         guesses.append(next_guess)
         if is_solved(feedback):
@@ -1044,10 +1540,110 @@ def filter_candidates_by_feedback(candidates, guess, feedback):
 
 
 def choose_next_candidate(candidates, previous_guesses, allowed_guesses):
+    return choose_answer_candidate(candidates, previous_guesses, allowed_guesses, "off")
+
+
+def choose_answer_candidate(
+    candidates,
+    previous_guesses,
+    allowed_guesses,
+    answer_weighting,
+    weighting_changes=None,
+    answer=None,
+    guess_number=None,
+):
     allowed = set(allowed_guesses)
     previous = set(previous_guesses)
+    available_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate in allowed and candidate not in previous
+    ]
+    if not available_candidates:
+        raise RuntimeError("No remaining candidate is available as a new guess.")
+    if answer_weighting == "simple":
+        weighted_choice = max(
+            available_candidates,
+            key=lambda candidate: (answer_likelihood_score(candidate), -candidates.index(candidate)),
+        )
+        unweighted_choice = available_candidates[0]
+        if weighting_changes is not None and weighted_choice != unweighted_choice:
+            weighting_changes.append(
+                {
+                    "answer": answer or "",
+                    "guess_number": guess_number or 0,
+                    "unweighted_choice": unweighted_choice,
+                    "weighted_choice": weighted_choice,
+                    "remaining_candidates": tuple(candidates),
+                }
+            )
+        return weighted_choice
+    if answer_weighting != "off":
+        raise ValueError(f"Unsupported answer weighting mode: {answer_weighting}")
+    return available_candidates[0]
+
+
+def answer_likelihood_score(word):
+    score = 0
+    common_letters = set("etaoinshrldcu")
+    rare_letters = set("xzqj")
+    very_rare_letters = set("qxzj")
+    awkward_pairs = ("qx", "xq", "jq", "qj", "zx", "xz", "jj", "qq", "vv", "ww")
+    common_endings = ("er", "ch", "sh", "th", "ck", "ly", "dy", "ny", "ry", "ty", "al", "el")
+
+    for letter in word:
+        if letter in common_letters:
+            score += 2
+        if letter in rare_letters:
+            score -= 4
+
+    positional_bonus = (
+        set("scrptb"),
+        set("aeoril"),
+        set("aironeu"),
+        set("nteral"),
+        set("eytrhd"),
+    )
+    for index, letter in enumerate(word):
+        if index < len(positional_bonus) and letter in positional_bonus[index]:
+            score += 2
+
+    repeated_letters = len(word) - len(set(word))
+    if repeated_letters:
+        score -= 4 * repeated_letters
+        if any(word.count(letter) > 1 and letter in very_rare_letters for letter in set(word)):
+            score -= 6
+
+    if word.endswith(common_endings):
+        score += 4
+    if word[-1] in "eytldr":
+        score += 2
+    if word[1] in "aeiou" or word[2] in "aeiou":
+        score += 2
+    if sum(1 for letter in word if letter in "aeiou") in (1, 2):
+        score += 2
+
+    for pair in awkward_pairs:
+        if pair in word:
+            score -= 5
+
+    if "q" in word and "qu" not in word:
+        score -= 6
+
+    return score
+
+
+def choose_next_candidate_weighted(candidates, previous_guesses, allowed_guesses):
+    return choose_answer_candidate(candidates, previous_guesses, allowed_guesses, "simple")
+
+
+def choose_next_candidate_unweighted(candidates, previous_guesses, allowed_guesses):
+    return choose_answer_candidate(candidates, previous_guesses, allowed_guesses, "off")
+
+
+def choose_next_candidate_from_available(candidates, previous_guesses, allowed_guesses):
     for candidate in candidates:
-        if candidate in allowed and candidate not in previous:
+        if candidate in allowed_guesses and candidate not in previous_guesses:
             return candidate
     raise RuntimeError("No remaining candidate is available as a new guess.")
 
@@ -1061,6 +1657,10 @@ def choose_next_guess_with_optional_probe(
     use_bucket_strategy=False,
     use_hybrid_strategy=False,
     trap_threshold=2,
+    answer_weighting="off",
+    weighting_changes=None,
+    answer=None,
+    guess_number=None,
 ):
     if use_hybrid_strategy:
         return choose_hybrid_guess(
@@ -1069,14 +1669,37 @@ def choose_next_guess_with_optional_probe(
             allowed_guesses,
             probe_pool,
             trap_threshold,
+            answer_weighting,
+            weighting_changes,
+            answer,
+            guess_number,
         )
     if use_bucket_strategy:
-        return choose_bucket_probe(candidates, previous_guesses, probe_pool)
+        probe = choose_bucket_probe(candidates, previous_guesses, probe_pool)
+        if probe is not None:
+            return probe
+        return choose_answer_candidate(
+            candidates,
+            previous_guesses,
+            allowed_guesses,
+            answer_weighting,
+            weighting_changes,
+            answer,
+            guess_number,
+        )
     if use_trap_avoidance and is_trap_family(candidates):
         probe = choose_trap_probe(candidates, previous_guesses, probe_pool)
         if probe is not None:
             return probe
-    return choose_next_candidate(candidates, previous_guesses, allowed_guesses)
+    return choose_answer_candidate(
+        candidates,
+        previous_guesses,
+        allowed_guesses,
+        answer_weighting,
+        weighting_changes,
+        answer,
+        guess_number,
+    )
 
 
 def choose_hybrid_guess(
@@ -1085,8 +1708,20 @@ def choose_hybrid_guess(
     allowed_guesses,
     probe_pool,
     trap_threshold,
+    answer_weighting="off",
+    weighting_changes=None,
+    answer=None,
+    guess_number=None,
 ):
-    normal_guess = choose_next_candidate(candidates, previous_guesses, allowed_guesses)
+    normal_guess = choose_answer_candidate(
+        candidates,
+        previous_guesses,
+        allowed_guesses,
+        answer_weighting,
+        weighting_changes,
+        answer,
+        guess_number,
+    )
     normal_max_bucket = max(feedback_bucket_sizes(normal_guess, candidates))
     if normal_max_bucket > trap_threshold:
         return choose_bucket_probe(candidates, previous_guesses, probe_pool)
@@ -1107,8 +1742,6 @@ def choose_bucket_probe(candidates, previous_guesses, probe_pool):
             best_guess = guess
             best_rank = rank
 
-    if best_guess is None:
-        raise RuntimeError("No available bucket probe guess.")
     return best_guess
 
 
@@ -1266,6 +1899,37 @@ def print_worst_patterns(rows):
             f"{row['max_guesses']:<4} "
             f"{row['risk']}"
         )
+
+
+def print_weighting_changes(changes, enabled=True, limit=25):
+    if not enabled:
+        print("Weighting changed decisions: 0")
+        print("Games affected: 0")
+        return
+
+    affected_games = {change["answer"] for change in changes if change["answer"]}
+    print(f"Weighting changed decisions: {len(changes)}")
+    print(f"Games affected: {len(affected_games)}")
+    if not changes:
+        return
+
+    print("Weighting change examples:")
+    print("answer  guess#  unweighted  weighted  remaining_candidates")
+    for change in changes[:limit]:
+        print(
+            f"{change['answer']:<7} "
+            f"{change['guess_number']:<7} "
+            f"{change['unweighted_choice']:<11} "
+            f"{change['weighted_choice']:<8} "
+            f"{format_remaining_candidates(change['remaining_candidates'])}"
+        )
+
+
+def format_remaining_candidates(candidates, limit=12):
+    shown = ", ".join(candidates[:limit])
+    if len(candidates) > limit:
+        return f"{shown}..."
+    return shown
 
 
 def print_strategy_report(rows):
@@ -1545,7 +2209,12 @@ def write_tune_pattern_csv(path, rows):
         csv_path.parent.mkdir(parents=True, exist_ok=True)
 
     with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=TUNE_PATTERN_COLUMNS)
+        fieldnames = (
+            TUNE_PATTERN_BRANCH_COLUMNS
+            if rows and "worst_branch_pattern" in rows[0]
+            else TUNE_PATTERN_COLUMNS
+        )
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -1557,6 +2226,22 @@ def write_tune_branch_csv(path, rows):
 
     with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=TUNE_BRANCH_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_tune_path_csv(path, rows):
+    csv_path = Path(path)
+    if csv_path.parent != Path("."):
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+        fieldnames = (
+            TUNE_PATH_BRANCH_COLUMNS
+            if rows and "worst_branch_pattern" in rows[0]
+            else TUNE_PATH_COLUMNS
+        )
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
