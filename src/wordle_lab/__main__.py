@@ -335,7 +335,7 @@ def main(argv=None):
         rows = build_strategy_comparison_rows(
             allowed_guesses,
             possible_answers,
-            use_overrides=not args.no_overrides,
+            use_overrides=False if args.no_overrides else None,
             answer_weighting=args.answer_weighting,
         )
         print_strategy_report(rows)
@@ -433,7 +433,7 @@ def main(argv=None):
                 possible_answers,
                 second_guess_pool_name=args.second_guess_pool,
                 trap_threshold=args.trap_threshold,
-                use_overrides=not args.no_overrides,
+                use_overrides=False if args.no_overrides else None,
                 answer_weighting=args.answer_weighting,
                 weighting_changes=weighting_changes if args.show_weighting_changes else None,
             )
@@ -692,6 +692,14 @@ def find_path_guess_override(
             "was already guessed."
         )
     return override_guess
+
+
+def tuned_overrides_enabled(strategy, use_overrides):
+    if use_overrides is False:
+        return False
+    if use_overrides is True:
+        return True
+    return strategy == "second-map-bucket"
 
 
 def play_tuned_pattern_game(
@@ -1326,7 +1334,7 @@ def build_strategy_comparison_rows(
     allowed_guesses,
     possible_answers,
     first_guess="slate",
-    use_overrides=True,
+    use_overrides=None,
     answer_weighting="off",
 ):
     strategy_specs = (
@@ -1365,7 +1373,7 @@ def build_strategy_row(
     possible_answers,
     second_guess_pool_name="allowed",
     trap_threshold=2,
-    use_overrides=True,
+    use_overrides=None,
     answer_weighting="off",
 ):
     row, _games = build_strategy_result(
@@ -1388,7 +1396,7 @@ def build_strategy_result(
     possible_answers,
     second_guess_pool_name="allowed",
     trap_threshold=2,
-    use_overrides=True,
+    use_overrides=None,
     answer_weighting="off",
     weighting_changes=None,
 ):
@@ -1430,6 +1438,7 @@ def build_strategy_result(
         "second-map-bucket",
         "second-map-hybrid",
     }:
+        effective_use_overrides = tuned_overrides_enabled(strategy, use_overrides)
         second_guess_pool = (
             allowed_guesses if second_guess_pool_name == "allowed" else possible_answers
         )
@@ -1442,7 +1451,7 @@ def build_strategy_result(
         second_guess_by_pattern = {
             row["pattern"]: row["best_balanced"] for row in second_guess_rows
         }
-        if use_overrides:
+        if effective_use_overrides:
             apply_second_guess_overrides(
                 first_guess,
                 second_guess_pool_name,
@@ -1463,7 +1472,7 @@ def build_strategy_result(
                 probe_pool=second_guess_pool,
                 answer_weighting=answer_weighting,
                 weighting_changes=weighting_changes,
-                use_overrides=use_overrides,
+                use_overrides=effective_use_overrides,
                 second_guess_pool_name=second_guess_pool_name,
             )
             for answer in possible_answers
@@ -1492,7 +1501,7 @@ def play_second_map_game(
     probe_pool=None,
     answer_weighting="off",
     weighting_changes=None,
-    use_overrides=True,
+    use_overrides=False,
     second_guess_pool_name="allowed",
 ):
     guesses = []

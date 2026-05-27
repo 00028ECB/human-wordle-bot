@@ -48,6 +48,7 @@ from src.wordle_lab.__main__ import (
     is_trap_family,
     main,
     play_second_map_game,
+    tuned_overrides_enabled,
     worst_csv_path,
     write_worst_games_csv,
     write_second_guess_csv,
@@ -1269,6 +1270,19 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertEqual(game.guesses[:3], ("slate", "frond", "cough"))
+
+    def test_tuned_overrides_default_only_for_second_map_bucket(self):
+        self.assertFalse(tuned_overrides_enabled("baseline", None))
+        self.assertFalse(tuned_overrides_enabled("second-map", None))
+        self.assertFalse(tuned_overrides_enabled("second-map-trap", None))
+        self.assertTrue(tuned_overrides_enabled("second-map-bucket", None))
+        self.assertFalse(tuned_overrides_enabled("second-map-hybrid", None))
+
+    def test_tuned_overrides_can_be_disabled_for_second_map_bucket(self):
+        self.assertFalse(tuned_overrides_enabled("second-map-bucket", False))
+
+    def test_tuned_overrides_can_be_explicitly_enabled_for_other_strategies(self):
+        self.assertTrue(tuned_overrides_enabled("second-map", True))
 
     def test_build_strategy_comparison_rows_returns_builtin_slate_set(self):
         allowed_words = ("raise", "slate", "crane", "trace")

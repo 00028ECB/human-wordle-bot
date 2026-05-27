@@ -143,7 +143,7 @@ Use `--tune-path` for deeper branches. Give alternating guess/pattern pairs endi
 
 Use `--answer-weighting simple` to prefer more Wordle-like answer candidates when the strategy is choosing among remaining possible answers. The default is `--answer-weighting off`, which preserves the original first-remaining-candidate behavior.
 
-Built-in second-guess overrides can pin a tuned answer for a specific first word, feedback pattern, and pool. Use `--no-overrides` to compare against the unmodified second-map recommendation.
+Built-in pattern and path overrides are tuned for `second-map-bucket`. They apply by default only to `second-map-bucket`, so baseline, second-map, trap, and hybrid comparisons stay untuned unless code explicitly opts in. Use `--no-overrides` with `second-map-bucket` to compare against the unmodified second-map recommendation.
 
 Use `--compare-strategies` to run the built-in `slate` leaderboard across baseline, second-map, trap, and bucket strategies with both answer-only and allowed second-guess pools.
 
