@@ -40,12 +40,14 @@ from src.wordle_lab.__main__ import (
     choose_trap_probe,
     differing_letters,
     feedback_bucket_sizes,
+    find_path_guess_override,
     format_comparison_row,
     filter_candidates_for_path,
     format_tune_path_label,
     format_remaining_candidates,
     is_trap_family,
     main,
+    play_second_map_game,
     worst_csv_path,
     write_worst_games_csv,
     write_second_guess_csv,
@@ -437,6 +439,7 @@ class CliTests(unittest.TestCase):
                         "slate",
                         "--second-guess-pool",
                         "answers",
+                        "--no-overrides",
                     ]
                 )
 
@@ -466,6 +469,7 @@ class CliTests(unittest.TestCase):
                         "slate",
                         "--second-guess-pool",
                         "answers",
+                        "--no-overrides",
                     ]
                 )
 
@@ -495,6 +499,7 @@ class CliTests(unittest.TestCase):
                         "slate",
                         "--second-guess-pool",
                         "answers",
+                        "--no-overrides",
                     ]
                 )
 
@@ -526,6 +531,7 @@ class CliTests(unittest.TestCase):
                         "answers",
                         "--answer-weighting",
                         "simple",
+                        "--no-overrides",
                     ]
                 )
 
@@ -583,6 +589,7 @@ class CliTests(unittest.TestCase):
                         "answers",
                         "--trap-threshold",
                         "3",
+                        "--no-overrides",
                     ]
                 )
 
@@ -607,6 +614,7 @@ class CliTests(unittest.TestCase):
                         "--allowed",
                         str(allowed_path),
                         "--compare-strategies",
+                        "--no-overrides",
                     ]
                 )
 
@@ -881,6 +889,7 @@ class CliTests(unittest.TestCase):
                         "answers",
                         "--show-worst",
                         "2",
+                        "--no-overrides",
                     ]
                 )
 
@@ -912,6 +921,7 @@ class CliTests(unittest.TestCase):
                         "answers",
                         "--worst-patterns",
                         "2",
+                        "--no-overrides",
                     ]
                 )
 
@@ -1075,6 +1085,7 @@ class CliTests(unittest.TestCase):
             allowed_words,
             answer_words,
             second_guess_pool_name="answers",
+            use_overrides=False,
         )
 
         self.assertEqual(row["strategy"], "second-map")
@@ -1091,6 +1102,7 @@ class CliTests(unittest.TestCase):
             allowed_words,
             answer_words,
             second_guess_pool_name="answers",
+            use_overrides=False,
         )
 
         self.assertEqual(row["strategy"], "second-map-trap")
@@ -1107,6 +1119,7 @@ class CliTests(unittest.TestCase):
             allowed_words,
             answer_words,
             second_guess_pool_name="answers",
+            use_overrides=False,
         )
 
         self.assertEqual(row["strategy"], "second-map-bucket")
@@ -1124,6 +1137,7 @@ class CliTests(unittest.TestCase):
             answer_words,
             second_guess_pool_name="answers",
             trap_threshold=3,
+            use_overrides=False,
         )
 
         self.assertEqual(row["strategy"], "second-map-hybrid")
@@ -1135,6 +1149,7 @@ class CliTests(unittest.TestCase):
             ".....": "pound",
             "...Y.": "mount",
             "....Y": "heron",
+            "..G.G": "crank",
             "..Y..": "major",
             "..Y.Y": "abbey",
             "..YY.": "tacit",
@@ -1144,13 +1159,14 @@ class CliTests(unittest.TestCase):
         apply_second_guess_overrides(
             "slate",
             "answers",
-            ("frond", "tough", "rocky", "randy", "march", "pouch", "dilly"),
+            ("frond", "tough", "rocky", "brick", "randy", "march", "pouch", "dilly"),
             second_guess_by_pattern,
         )
 
         self.assertEqual(second_guess_by_pattern["....."], "frond")
         self.assertEqual(second_guess_by_pattern["...Y."], "tough")
         self.assertEqual(second_guess_by_pattern["....Y"], "rocky")
+        self.assertEqual(second_guess_by_pattern["..G.G"], "brick")
         self.assertEqual(second_guess_by_pattern["..Y.."], "randy")
         self.assertEqual(second_guess_by_pattern["..Y.Y"], "march")
         self.assertEqual(second_guess_by_pattern["..YY."], "pouch")
@@ -1172,6 +1188,7 @@ class CliTests(unittest.TestCase):
             ".....": "pound",
             "...Y.": "mount",
             "....Y": "heron",
+            "..G.G": "crank",
             "..Y..": "major",
             "..Y.Y": "abbey",
             "..YY.": "tacit",
@@ -1181,23 +1198,87 @@ class CliTests(unittest.TestCase):
         apply_second_guess_overrides(
             "slate",
             "allowed",
-            ("frond", "tough", "heron", "rocky", "randy", "march", "pouch", "dilly"),
+            ("frond", "tough", "heron", "rocky", "brick", "randy", "march", "pouch", "dilly"),
             second_guess_by_pattern,
         )
 
         self.assertEqual(second_guess_by_pattern["....."], "pound")
         self.assertEqual(second_guess_by_pattern["...Y."], "mount")
         self.assertEqual(second_guess_by_pattern["....Y"], "heron")
+        self.assertEqual(second_guess_by_pattern["..G.G"], "crank")
         self.assertEqual(second_guess_by_pattern["..Y.."], "major")
         self.assertEqual(second_guess_by_pattern["..Y.Y"], "abbey")
         self.assertEqual(second_guess_by_pattern["..YY."], "tacit")
         self.assertEqual(second_guess_by_pattern[".Y..."], "colon")
 
+    def test_find_path_guess_override_uses_matching_override(self):
+        override_guess = find_path_guess_override(
+            "slate",
+            ".....",
+            "frond",
+            "..Y..",
+            "answers",
+            ("frond", "pouch"),
+            ("slate", "frond"),
+        )
+
+        self.assertEqual(override_guess, "pouch")
+
+    def test_find_path_guess_override_rejects_invalid_pool_word(self):
+        with self.assertRaises(ValueError):
+            find_path_guess_override(
+                "slate",
+                ".....",
+                "frond",
+                "..Y..",
+                "answers",
+                ("frond",),
+                ("slate", "frond"),
+            )
+
+    def test_play_second_map_game_uses_path_override_for_third_guess(self):
+        allowed_words = ("slate", "frond", "cough", "pouch")
+        answer_words = ("cough", "pouch")
+
+        game = play_second_map_game(
+            "pouch",
+            allowed_words,
+            answer_words,
+            "slate",
+            {".....": "frond"},
+            probe_pool=answer_words,
+            use_overrides=True,
+            second_guess_pool_name="answers",
+        )
+
+        self.assertEqual(game.guesses[:3], ("slate", "frond", "pouch"))
+
+    def test_play_second_map_game_disables_path_override(self):
+        allowed_words = ("slate", "frond", "cough", "pouch")
+        answer_words = ("cough", "pouch")
+
+        game = play_second_map_game(
+            "pouch",
+            allowed_words,
+            answer_words,
+            "slate",
+            {".....": "frond"},
+            probe_pool=answer_words,
+            use_overrides=False,
+            second_guess_pool_name="answers",
+        )
+
+        self.assertEqual(game.guesses[:3], ("slate", "frond", "cough"))
+
     def test_build_strategy_comparison_rows_returns_builtin_slate_set(self):
         allowed_words = ("raise", "slate", "crane", "trace")
         answer_words = ("raise", "slate", "crane")
 
-        rows = build_strategy_comparison_rows(allowed_words, answer_words)
+        rows = build_strategy_comparison_rows(
+            allowed_words,
+            answer_words,
+            use_overrides=False,
+        )
 
         self.assertEqual(len(rows), 9)
         self.assertEqual(rows[0]["strategy"], "baseline")
@@ -1792,6 +1873,7 @@ class CliTests(unittest.TestCase):
                         "slate",
                         "--second-guess-pool",
                         "answers",
+                        "--no-overrides",
                         "--csv",
                         str(csv_path),
                     ]
@@ -1821,6 +1903,7 @@ class CliTests(unittest.TestCase):
                         "--allowed",
                         str(allowed_path),
                         "--compare-strategies",
+                        "--no-overrides",
                         "--csv",
                         str(csv_path),
                     ]
@@ -2009,6 +2092,7 @@ class CliTests(unittest.TestCase):
                         "answers",
                         "--show-worst",
                         "2",
+                        "--no-overrides",
                         "--csv",
                         str(csv_path),
                     ]

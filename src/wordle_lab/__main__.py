@@ -118,10 +118,15 @@ SECOND_GUESS_OVERRIDES = {
     ("slate", ".....", "answers"): "frond",
     ("slate", "...Y.", "answers"): "tough",
     ("slate", "....Y", "answers"): "rocky",
+    ("slate", "..G.G", "answers"): "brick",
     ("slate", "..Y..", "answers"): "randy",
     ("slate", "..Y.Y", "answers"): "march",
     ("slate", "..YY.", "answers"): "pouch",
     ("slate", ".Y...", "answers"): "dilly",
+}
+
+PATH_GUESS_OVERRIDES = {
+    ("slate", ".....", "frond", "..Y..", "answers"): "pouch",
 }
 
 
@@ -658,6 +663,35 @@ def apply_second_guess_overrides(
                 f"is not in the {second_guess_pool_name} second-guess pool."
             )
         second_guess_by_pattern[pattern] = override_guess
+
+
+def find_path_guess_override(
+    first_guess,
+    first_pattern,
+    second_guess,
+    second_pattern,
+    second_guess_pool_name,
+    guess_pool,
+    previous_guesses,
+):
+    override_guess = PATH_GUESS_OVERRIDES.get(
+        (first_guess, first_pattern, second_guess, second_pattern, second_guess_pool_name)
+    )
+    if override_guess is None:
+        return None
+    if override_guess not in guess_pool:
+        raise ValueError(
+            f"Override {override_guess!r} for path "
+            f"{first_guess!r} {first_pattern!r} {second_guess!r} {second_pattern!r} "
+            f"is not in the {second_guess_pool_name} guess pool."
+        )
+    if override_guess in previous_guesses:
+        raise ValueError(
+            f"Override {override_guess!r} for path "
+            f"{first_guess!r} {first_pattern!r} {second_guess!r} {second_pattern!r} "
+            "was already guessed."
+        )
+    return override_guess
 
 
 def play_tuned_pattern_game(
@@ -1429,6 +1463,8 @@ def build_strategy_result(
                 probe_pool=second_guess_pool,
                 answer_weighting=answer_weighting,
                 weighting_changes=weighting_changes,
+                use_overrides=use_overrides,
+                second_guess_pool_name=second_guess_pool_name,
             )
             for answer in possible_answers
         )
@@ -1456,40 +1492,57 @@ def play_second_map_game(
     probe_pool=None,
     answer_weighting="off",
     weighting_changes=None,
+    use_overrides=True,
+    second_guess_pool_name="allowed",
 ):
     guesses = []
     candidates = tuple(possible_answers)
     if probe_pool is None:
         probe_pool = allowed_guesses
 
-    feedback = score_guess(first_guess, answer)
+    first_feedback = score_guess(first_guess, answer)
     guesses.append(first_guess)
-    if is_solved(feedback):
+    if is_solved(first_feedback):
         return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
 
-    candidates = filter_candidates_by_feedback(candidates, first_guess, feedback)
-    second_guess = second_guess_by_pattern[feedback]
-    feedback = score_guess(second_guess, answer)
+    candidates = filter_candidates_by_feedback(candidates, first_guess, first_feedback)
+    second_guess = second_guess_by_pattern[first_feedback]
+    second_feedback = score_guess(second_guess, answer)
     guesses.append(second_guess)
-    if is_solved(feedback):
+    if is_solved(second_feedback):
         return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
 
-    candidates = filter_candidates_by_feedback(candidates, second_guess, feedback)
-    while candidates:
-        next_guess = choose_next_guess_with_optional_probe(
-            candidates,
-            guesses,
-            allowed_guesses,
+    candidates = filter_candidates_by_feedback(candidates, second_guess, second_feedback)
+    path_override = None
+    if use_overrides:
+        path_override = find_path_guess_override(
+            first_guess,
+            first_feedback,
+            second_guess,
+            second_feedback,
+            second_guess_pool_name,
             probe_pool,
-            use_trap_avoidance,
-            use_bucket_strategy,
-            use_hybrid_strategy,
-            trap_threshold,
-            answer_weighting,
-            weighting_changes,
-            answer,
-            len(guesses) + 1,
+            guesses,
         )
+    while candidates:
+        if path_override is not None:
+            next_guess = path_override
+            path_override = None
+        else:
+            next_guess = choose_next_guess_with_optional_probe(
+                candidates,
+                guesses,
+                allowed_guesses,
+                probe_pool,
+                use_trap_avoidance,
+                use_bucket_strategy,
+                use_hybrid_strategy,
+                trap_threshold,
+                answer_weighting,
+                weighting_changes,
+                answer,
+                len(guesses) + 1,
+            )
         feedback = score_guess(next_guess, answer)
         guesses.append(next_guess)
         if is_solved(feedback):
