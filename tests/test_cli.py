@@ -1149,28 +1149,43 @@ class CliTests(unittest.TestCase):
         second_guess_by_pattern = {
             ".....": "pound",
             "...Y.": "mount",
+            "...YY": "solid",
             "....Y": "heron",
             "..G.G": "crank",
             "..Y..": "major",
             "..Y.Y": "abbey",
             "..YY.": "tacit",
+            ".YY..": "brawl",
             ".Y...": "colon",
         }
 
         apply_second_guess_overrides(
             "slate",
             "answers",
-            ("frond", "tough", "rocky", "brick", "randy", "march", "pouch", "dilly"),
+            (
+                "frond",
+                "tough",
+                "deter",
+                "rocky",
+                "brick",
+                "randy",
+                "march",
+                "pouch",
+                "rally",
+                "dilly",
+            ),
             second_guess_by_pattern,
         )
 
         self.assertEqual(second_guess_by_pattern["....."], "frond")
         self.assertEqual(second_guess_by_pattern["...Y."], "tough")
+        self.assertEqual(second_guess_by_pattern["...YY"], "deter")
         self.assertEqual(second_guess_by_pattern["....Y"], "rocky")
         self.assertEqual(second_guess_by_pattern["..G.G"], "brick")
         self.assertEqual(second_guess_by_pattern["..Y.."], "randy")
         self.assertEqual(second_guess_by_pattern["..Y.Y"], "march")
         self.assertEqual(second_guess_by_pattern["..YY."], "pouch")
+        self.assertEqual(second_guess_by_pattern[".YY.."], "rally")
         self.assertEqual(second_guess_by_pattern[".Y..."], "dilly")
 
     def test_apply_second_guess_overrides_rejects_invalid_pool_word(self):
@@ -1188,28 +1203,44 @@ class CliTests(unittest.TestCase):
         second_guess_by_pattern = {
             ".....": "pound",
             "...Y.": "mount",
+            "...YY": "solid",
             "....Y": "heron",
             "..G.G": "crank",
             "..Y..": "major",
             "..Y.Y": "abbey",
             "..YY.": "tacit",
+            ".YY..": "brawl",
             ".Y...": "colon",
         }
 
         apply_second_guess_overrides(
             "slate",
             "allowed",
-            ("frond", "tough", "heron", "rocky", "brick", "randy", "march", "pouch", "dilly"),
+            (
+                "frond",
+                "tough",
+                "deter",
+                "heron",
+                "rocky",
+                "brick",
+                "randy",
+                "march",
+                "pouch",
+                "rally",
+                "dilly",
+            ),
             second_guess_by_pattern,
         )
 
         self.assertEqual(second_guess_by_pattern["....."], "pound")
         self.assertEqual(second_guess_by_pattern["...Y."], "mount")
+        self.assertEqual(second_guess_by_pattern["...YY"], "solid")
         self.assertEqual(second_guess_by_pattern["....Y"], "heron")
         self.assertEqual(second_guess_by_pattern["..G.G"], "crank")
         self.assertEqual(second_guess_by_pattern["..Y.."], "major")
         self.assertEqual(second_guess_by_pattern["..Y.Y"], "abbey")
         self.assertEqual(second_guess_by_pattern["..YY."], "tacit")
+        self.assertEqual(second_guess_by_pattern[".YY.."], "brawl")
         self.assertEqual(second_guess_by_pattern[".Y..."], "colon")
 
     def test_find_path_guess_override_uses_matching_override(self):

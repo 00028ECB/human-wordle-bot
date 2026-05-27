@@ -117,11 +117,13 @@ TUNE_PATH_BRANCH_COLUMNS = TUNE_PATH_COLUMNS + (
 SECOND_GUESS_OVERRIDES = {
     ("slate", ".....", "answers"): "frond",
     ("slate", "...Y.", "answers"): "tough",
+    ("slate", "...YY", "answers"): "deter",
     ("slate", "....Y", "answers"): "rocky",
     ("slate", "..G.G", "answers"): "brick",
     ("slate", "..Y..", "answers"): "randy",
     ("slate", "..Y.Y", "answers"): "march",
     ("slate", "..YY.", "answers"): "pouch",
+    ("slate", ".YY..", "answers"): "rally",
     ("slate", ".Y...", "answers"): "dilly",
 }
 
