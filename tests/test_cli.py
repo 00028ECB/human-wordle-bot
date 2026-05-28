@@ -8,6 +8,7 @@ from src.wordle_lab.__main__ import (
     CSV_COLUMNS,
     SECOND_GUESS_COLUMNS,
     STRATEGY_COLUMNS,
+    OPENER_STRATEGY_COLUMNS,
     TUNE_PATTERN_BRANCH_COLUMNS,
     TUNE_BRANCH_COLUMNS,
     TUNE_PATTERN_COLUMNS,
@@ -20,7 +21,9 @@ from src.wordle_lab.__main__ import (
     build_comparison_row,
     build_parser,
     build_second_guess_map_rows,
+    build_opener_strategy_comparison_rows,
     build_strategy_comparison_rows,
+    build_strategy_result,
     build_worst_game_rows,
     build_worst_pattern_rows,
     build_worst_prefix_rows,
@@ -57,6 +60,7 @@ from src.wordle_lab.__main__ import (
     play_second_map_game,
     print_final_clusters,
     print_final_cluster_override_changes,
+    print_opener_strategy_report,
     print_small_order_changes,
     print_worst_prefixes,
     tune_objective_rank,
@@ -66,6 +70,7 @@ from src.wordle_lab.__main__ import (
     write_second_guess_csv,
     write_comparison_csv,
     write_strategy_csv,
+    write_opener_strategy_csv,
     write_tune_branch_csv,
     write_tune_path_csv,
     write_tune_pattern_csv,
@@ -88,6 +93,24 @@ class CliTests(unittest.TestCase):
         args = build_parser().parse_args(["--compare", "raise", "slate", "crane"])
 
         self.assertEqual(args.compare, ["raise", "slate", "crane"])
+
+    def test_parser_accepts_compare_openers_with_strategy(self):
+        args = build_parser().parse_args(
+            [
+                "--compare-openers-with-strategy",
+                "slate",
+                "crane",
+                "raise",
+                "--strategy",
+                "second-map-bucket",
+                "--second-guess-pool",
+                "answers",
+            ]
+        )
+
+        self.assertEqual(args.compare_openers_with_strategy, ["slate", "crane", "raise"])
+        self.assertEqual(args.strategy, "second-map-bucket")
+        self.assertEqual(args.second_guess_pool, "answers")
 
     def test_parser_accepts_top_openers_limit(self):
         args = build_parser().parse_args(["--top-openers", "25"])
@@ -803,6 +826,39 @@ class CliTests(unittest.TestCase):
         self.assertIn("second-map-bucket", report)
         self.assertIn("second-map-hybrid", report)
 
+    def test_main_reports_compare_openers_with_strategy_for_custom_word_lists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--compare-openers-with-strategy",
+                        "slate",
+                        "crane",
+                        "--strategy",
+                        "second-map-bucket",
+                        "--second-guess-pool",
+                        "answers",
+                        "--no-overrides",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("First   Strategy", report)
+        self.assertIn("slate", report)
+        self.assertIn("crane", report)
+        self.assertIn("second-map-bucket", report)
+
     def test_main_reports_tune_pattern_for_custom_word_lists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -1135,6 +1191,38 @@ class CliTests(unittest.TestCase):
         report = output.getvalue()
         self.assertIn("Worst patterns:", report)
         self.assertIn("pattern  games  avg", report)
+
+    def test_main_strategy_worst_patterns_allows_non_slate_first_guess(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            answers_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--strategy",
+                        "second-map-bucket",
+                        "--first",
+                        "trace",
+                        "--second-guess-pool",
+                        "answers",
+                        "--worst-patterns",
+                        "2",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("second-map-bucket", report)
+        self.assertIn("trace", report)
+        self.assertIn("Worst patterns:", report)
 
     def test_main_strategy_worst_prefixes_prints_prefix_table(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1555,6 +1643,20 @@ class CliTests(unittest.TestCase):
         self.assertEqual(second_guess_by_pattern["..G.."], "grove")
         self.assertEqual(second_guess_by_pattern["Y...."], "mimic")
 
+    def test_build_strategy_result_does_not_apply_slate_overrides_to_other_openers(self):
+        allowed_words = ("trace", "frond", "pound", "cough", "pouch")
+        answer_words = ("cough", "pouch")
+
+        _row, games = build_strategy_result(
+            "second-map-bucket",
+            "trace",
+            allowed_words,
+            answer_words,
+            second_guess_pool_name="answers",
+        )
+
+        self.assertNotEqual(games[1].guesses[:3], ("trace", "frond", "pouch"))
+
     def test_find_path_guess_override_uses_matching_override(self):
         override_guess = find_path_guess_override(
             "slate",
@@ -1656,6 +1758,25 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rows[0]["second_guess_pool"], "-")
         self.assertEqual(rows[-1]["strategy"], "second-map-hybrid")
         self.assertEqual(rows[-1]["second_guess_pool"], "allowed")
+
+    def test_build_opener_strategy_comparison_rows_returns_requested_openers(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        rows = build_opener_strategy_comparison_rows(
+            ("slate", "crane"),
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            second_guess_pool_name="answers",
+            use_overrides=False,
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["first"], "slate")
+        self.assertEqual(rows[0]["strategy"], "second-map-bucket")
+        self.assertEqual(rows[0]["pool"], "answers")
+        self.assertEqual(rows[1]["first"], "crane")
 
     def test_is_trap_family_detects_shared_fixed_positions(self):
         trap_candidates = ("gaunt", "haunt", "jaunt", "taunt", "vaunt")
@@ -2759,6 +2880,71 @@ class CliTests(unittest.TestCase):
         self.assertEqual(len(csv_text.strip().splitlines()), 10)
         self.assertIn("strategy,first_guess,second_guess_pool", csv_text)
 
+    def test_write_opener_strategy_csv_creates_parent_folder(self):
+        rows = (
+            {
+                "first": "slate",
+                "strategy": "second-map-bucket",
+                "pool": "answers",
+                "tested": 3,
+                "solved": 3,
+                "average": "1.67",
+                "solved_3_or_less": 3,
+                "solved_4_or_less": 3,
+                "fives": 0,
+                "sixes": 0,
+                "failed": 0,
+                "risk_score": 0,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "results" / "opener_strategy.csv"
+
+            write_opener_strategy_csv(path, rows)
+
+            csv_text = path.read_text(encoding="utf-8")
+
+        self.assertIn(",".join(OPENER_STRATEGY_COLUMNS), csv_text)
+        self.assertIn("slate,second-map-bucket,answers", csv_text)
+
+    def test_main_compare_openers_with_strategy_csv_writes_file_and_prints_table(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            csv_path = temp_path / "results" / "openers.csv"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--compare-openers-with-strategy",
+                        "slate",
+                        "crane",
+                        "--strategy",
+                        "second-map-bucket",
+                        "--second-guess-pool",
+                        "answers",
+                        "--no-overrides",
+                        "--csv",
+                        str(csv_path),
+                    ]
+                )
+
+            report = output.getvalue()
+            csv_text = csv_path.read_text(encoding="utf-8")
+
+        self.assertIn("First   Strategy", report)
+        self.assertEqual(len(csv_text.strip().splitlines()), 3)
+        self.assertIn("first,strategy,pool,tested", csv_text)
+
     def test_main_tune_pattern_with_csv_writes_file_and_prints_table(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -3107,6 +3293,10 @@ class CliTests(unittest.TestCase):
     def test_csv_without_compare_exits(self):
         with self.assertRaises(SystemExit):
             main(["--csv", "results/out.csv"])
+
+    def test_compare_openers_with_strategy_requires_strategy(self):
+        with self.assertRaises(SystemExit):
+            main(["--compare-openers-with-strategy", "slate", "crane"])
 
     def test_top_openers_requires_positive_limit(self):
         with self.assertRaises(SystemExit):

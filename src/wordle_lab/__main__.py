@@ -53,6 +53,21 @@ STRATEGY_COLUMNS = (
     "risk_score",
 )
 
+OPENER_STRATEGY_COLUMNS = (
+    "first",
+    "strategy",
+    "pool",
+    "tested",
+    "solved",
+    "average",
+    "solved_3_or_less",
+    "solved_4_or_less",
+    "fives",
+    "sixes",
+    "failed",
+    "risk_score",
+)
+
 WORST_GAME_COLUMNS = (
     "answer",
     "guess_count",
@@ -175,6 +190,12 @@ def build_parser():
         "--compare",
         nargs="+",
         help="compare multiple first guesses",
+    )
+    mode.add_argument(
+        "--compare-openers-with-strategy",
+        nargs="+",
+        metavar="FIRST",
+        help="compare multiple first guesses using the selected --strategy",
     )
     mode.add_argument(
         "--top-openers",
@@ -404,13 +425,15 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.csv and not (
-        args.compare or args.top_openers or args.second_guess_map or args.strategy
-        or args.compare_strategies or args.tune_pattern or args.tune_branch
-        or args.tune_path
+        args.compare or args.compare_openers_with_strategy or args.top_openers
+        or args.second_guess_map or args.strategy or args.compare_strategies
+        or args.tune_pattern or args.tune_branch or args.tune_path
     ):
         raise SystemExit(
-            "--csv can only be used with --compare, --top-openers, --second-guess-map, --strategy, --compare-strategies, --tune-pattern, --tune-branch, or --tune-path"
+            "--csv can only be used with --compare, --compare-openers-with-strategy, --top-openers, --second-guess-map, --strategy, --compare-strategies, --tune-pattern, --tune-branch, or --tune-path"
         )
+    if args.compare_openers_with_strategy and not args.strategy:
+        raise SystemExit("--compare-openers-with-strategy requires --strategy")
     if args.top_openers is not None and args.top_openers < 1:
         raise SystemExit("--top-openers must be at least 1")
     if args.limit_openers is not None and args.limit_openers < 1:
@@ -459,6 +482,31 @@ def main(argv=None):
         )
     except (FileNotFoundError, ValueError) as error:
         parser.error(str(error))
+
+    if args.compare_openers_with_strategy:
+        try:
+            rows = build_opener_strategy_comparison_rows(
+                args.compare_openers_with_strategy,
+                args.strategy,
+                allowed_guesses,
+                possible_answers,
+                second_guess_pool_name=args.second_guess_pool,
+                trap_threshold=args.trap_threshold,
+                use_overrides=False if args.no_overrides else None,
+                answer_weighting=args.answer_weighting,
+                small_candidate_order=args.small_candidate_order,
+                endgame_threshold=args.endgame_threshold,
+                max_expected_guesses=args.max_expected_guesses,
+                max_expected_states=args.max_expected_states,
+                expected_depth=args.expected_depth,
+                final_cluster_overrides=args.final_cluster_overrides,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+        print_opener_strategy_report(rows)
+        if args.csv:
+            write_opener_strategy_csv(args.csv, rows)
+        return
 
     if args.compare_strategies:
         rows = build_strategy_comparison_rows(
@@ -1621,6 +1669,65 @@ def build_strategy_comparison_rows(
     return tuple(rows)
 
 
+def build_opener_strategy_comparison_rows(
+    first_guesses,
+    strategy,
+    allowed_guesses,
+    possible_answers,
+    second_guess_pool_name="allowed",
+    trap_threshold=2,
+    use_overrides=None,
+    answer_weighting="off",
+    small_candidate_order="normal",
+    endgame_threshold=10,
+    max_expected_guesses=10,
+    max_expected_states=50000,
+    expected_depth=2,
+    final_cluster_overrides="off",
+):
+    rows = []
+    for first_guess in first_guesses:
+        first_guess = first_guess.lower()
+        opener_use_overrides = use_overrides
+        if first_guess != "slate":
+            opener_use_overrides = False
+        row = build_strategy_row(
+            strategy,
+            first_guess,
+            allowed_guesses,
+            possible_answers,
+            second_guess_pool_name=second_guess_pool_name,
+            trap_threshold=trap_threshold,
+            use_overrides=opener_use_overrides,
+            answer_weighting=answer_weighting,
+            small_candidate_order=small_candidate_order,
+            endgame_threshold=endgame_threshold,
+            max_expected_guesses=max_expected_guesses,
+            max_expected_states=max_expected_states,
+            expected_depth=expected_depth,
+            final_cluster_overrides=final_cluster_overrides,
+        )
+        rows.append(format_opener_strategy_row(row))
+    return tuple(rows)
+
+
+def format_opener_strategy_row(row):
+    return {
+        "first": row["first_guess"],
+        "strategy": row["strategy"],
+        "pool": row["second_guess_pool"] or "-",
+        "tested": row["tested"],
+        "solved": row["solved"],
+        "average": row["average"],
+        "solved_3_or_less": row["solved_3_or_less"],
+        "solved_4_or_less": row["solved_4_or_less"],
+        "fives": row["fives"],
+        "sixes": row["sixes"],
+        "failed": row["failed"],
+        "risk_score": row["risk_score"],
+    }
+
+
 def build_strategy_row(
     strategy,
     first_guess,
@@ -1722,7 +1829,10 @@ def build_strategy_result(
         "second-map-expected",
         "second-map-hybrid",
     }:
-        effective_use_overrides = tuned_overrides_enabled(strategy, use_overrides)
+        effective_use_overrides = (
+            first_guess == "slate"
+            and tuned_overrides_enabled(strategy, use_overrides)
+        )
         second_guess_pool = (
             allowed_guesses if second_guess_pool_name == "allowed" else possible_answers
         )
@@ -2760,6 +2870,25 @@ def print_strategy_report(rows):
         )
 
 
+def print_opener_strategy_report(rows):
+    print("First   Strategy    Pool     Tested  Solved  Avg   <=3   <=4   5s  6s  Fail  Risk")
+    for row in rows:
+        print(
+            f"{row['first']:<7} "
+            f"{row['strategy']:<11} "
+            f"{row['pool']:<8} "
+            f"{row['tested']:<7} "
+            f"{row['solved']:<7} "
+            f"{row['average']:<5} "
+            f"{row['solved_3_or_less']:<5} "
+            f"{row['solved_4_or_less']:<5} "
+            f"{row['fives']:<3} "
+            f"{row['sixes']:<3} "
+            f"{row['failed']:<5} "
+            f"{row['risk_score']}"
+        )
+
+
 def build_second_guess_map_rows(
     first_guess,
     allowed_guesses,
@@ -3008,6 +3137,17 @@ def write_strategy_csv(path, rows):
 
     with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=STRATEGY_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_opener_strategy_csv(path, rows):
+    csv_path = Path(path)
+    if csv_path.parent != Path("."):
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=OPENER_STRATEGY_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
 
