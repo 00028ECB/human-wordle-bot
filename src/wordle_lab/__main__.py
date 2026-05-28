@@ -147,6 +147,19 @@ SMALL_CANDIDATE_ORDER_PREFERENCES = {
     ("brief", "grief"): ("grief", "brief"),
 }
 
+FINAL_CLUSTER_OVERRIDES = {
+    ("buxom", "gumbo", "jumbo"): "jumbo",
+    ("dried", "pried", "weird"): "weird",
+    ("ember", "purer", "upper"): "ember",
+    ("femur", "fever", "fewer"): "fewer",
+    ("giver", "piper", "viper"): "viper",
+    ("biddy", "giddy"): "giddy",
+    ("breed", "greed"): "greed",
+    ("brief", "grief"): "grief",
+    ("frank", "prank"): "prank",
+    ("never", "newer"): "newer",
+}
+
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -274,6 +287,12 @@ def build_parser():
         help="show path prefixes with the most 5+ guess solved games for --strategy",
     )
     parser.add_argument(
+        "--show-final-clusters",
+        type=int,
+        metavar="N",
+        help="show repeated candidate clusters before guess 4 for 5+ guess solved games",
+    )
+    parser.add_argument(
         "--trap-threshold",
         type=int,
         default=2,
@@ -321,6 +340,12 @@ def build_parser():
         help="number of rows for --tune-pattern (default: 25)",
     )
     parser.add_argument(
+        "--tune-path-objective",
+        choices=("risk", "average", "fives", "safe-balanced"),
+        default="risk",
+        help="ranking objective for --tune-branch and --tune-path (default: risk)",
+    )
+    parser.add_argument(
         "--answer-weighting",
         choices=("off", "simple"),
         default="off",
@@ -341,6 +366,17 @@ def build_parser():
         "--show-small-order-changes",
         action="store_true",
         help="show where --small-candidate-order likelihood changes small-candidate choices",
+    )
+    parser.add_argument(
+        "--final-cluster-overrides",
+        choices=("on", "off"),
+        default="off",
+        help="use exact final-cluster override map during strategy solving (default: off)",
+    )
+    parser.add_argument(
+        "--show-final-cluster-override-changes",
+        action="store_true",
+        help="show where exact final-cluster overrides change strategy choices",
     )
     parser.add_argument(
         "--branch-summary",
@@ -395,8 +431,14 @@ def main(argv=None):
         raise SystemExit("--worst-prefixes must be at least 1")
     if args.worst_prefixes is not None and not args.strategy:
         raise SystemExit("--worst-prefixes can only be used with --strategy")
+    if args.show_final_clusters is not None and args.show_final_clusters < 1:
+        raise SystemExit("--show-final-clusters must be at least 1")
+    if args.show_final_clusters is not None and not args.strategy:
+        raise SystemExit("--show-final-clusters can only be used with --strategy")
     if args.show_small_order_changes and not args.strategy:
         raise SystemExit("--show-small-order-changes can only be used with --strategy")
+    if args.show_final_cluster_override_changes and not args.strategy:
+        raise SystemExit("--show-final-cluster-override-changes can only be used with --strategy")
     if args.trap_threshold < 1:
         raise SystemExit("--trap-threshold must be at least 1")
     if args.endgame_threshold < 1:
@@ -479,6 +521,7 @@ def main(argv=None):
                 trap_threshold=args.trap_threshold,
                 answer_weighting=args.answer_weighting,
                 small_candidate_order=args.small_candidate_order,
+                objective=args.tune_path_objective,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -505,6 +548,7 @@ def main(argv=None):
                 answer_weighting=args.answer_weighting,
                 small_candidate_order=args.small_candidate_order,
                 branch_summary=args.branch_summary,
+                objective=args.tune_path_objective,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -517,6 +561,7 @@ def main(argv=None):
     if args.strategy:
         weighting_changes = []
         small_order_changes = []
+        final_cluster_override_changes = []
         start_time = time.perf_counter()
         try:
             row, games = build_strategy_result(
@@ -537,6 +582,12 @@ def main(argv=None):
                 small_order_changes=(
                     small_order_changes if args.show_small_order_changes else None
                 ),
+                final_cluster_overrides=args.final_cluster_overrides,
+                final_cluster_override_changes=(
+                    final_cluster_override_changes
+                    if args.show_final_cluster_override_changes
+                    else None
+                ),
             )
         except ValueError as error:
             parser.error(str(error))
@@ -551,12 +602,25 @@ def main(argv=None):
                 small_order_changes,
                 enabled=args.small_candidate_order == "likelihood",
             )
+        if args.show_final_cluster_override_changes:
+            print_final_cluster_override_changes(
+                final_cluster_override_changes,
+                enabled=args.final_cluster_overrides == "on",
+            )
         worst_rows = ()
         if args.worst_patterns is not None:
             pattern_limit = None if args.worst_patterns == -1 else args.worst_patterns
             print_worst_patterns(build_worst_pattern_rows(games, pattern_limit))
         if args.worst_prefixes:
             print_worst_prefixes(build_worst_prefix_rows(games, args.worst_prefixes))
+        if args.show_final_clusters:
+            print_final_clusters(
+                build_final_cluster_rows(
+                    games,
+                    possible_answers,
+                    args.show_final_clusters,
+                )
+            )
         if args.show_worst:
             worst_rows = build_worst_game_rows(
                 games,
@@ -1025,6 +1089,7 @@ def build_tune_branch_result(
     trap_threshold=2,
     answer_weighting="off",
     small_candidate_order="normal",
+    objective="risk",
 ):
     validate_tune_pattern(first_guess, first_pattern, strategy, allowed_guesses)
     if second_guess not in allowed_guesses:
@@ -1081,15 +1146,7 @@ def build_tune_branch_result(
             )
         )
 
-    ranked_rows = sorted(
-        rows,
-        key=lambda row: (
-            row["risk_score"],
-            float(row["average"]),
-            -row["solved_4_or_less"],
-            row["third_guess"],
-        ),
-    )
+    ranked_rows = rank_tune_rows(rows, "third_guess", objective)
     return tuple(ranked_rows[:top]), selected_games
 
 
@@ -1106,6 +1163,7 @@ def build_tune_branch_rows(
     trap_threshold=2,
     answer_weighting="off",
     small_candidate_order="normal",
+    objective="risk",
 ):
     rows, _games = build_tune_branch_result(
         first_guess,
@@ -1120,6 +1178,7 @@ def build_tune_branch_rows(
         trap_threshold=trap_threshold,
         answer_weighting=answer_weighting,
         small_candidate_order=small_candidate_order,
+        objective=objective,
     )
     return rows
 
@@ -1233,6 +1292,7 @@ def build_tune_path_result(
     answer_weighting="off",
     small_candidate_order="normal",
     branch_summary=False,
+    objective="risk",
 ):
     path_guesses, path_patterns = parse_tune_path(path_steps, allowed_guesses)
     validate_tune_path_strategy(strategy)
@@ -1276,15 +1336,7 @@ def build_tune_path_result(
             )
         )
 
-    ranked_rows = sorted(
-        rows,
-        key=lambda row: (
-            row["risk_score"],
-            float(row["average"]),
-            -row["solved_4_or_less"],
-            row["next_guess"],
-        ),
-    )
+    ranked_rows = rank_tune_rows(rows, "next_guess", objective)
     if not selected_games and ranked_rows:
         best_next_guess = ranked_rows[0]["next_guess"]
         selected_games = tuple(
@@ -1316,6 +1368,7 @@ def build_tune_path_rows(
     answer_weighting="off",
     small_candidate_order="normal",
     branch_summary=False,
+    objective="risk",
 ):
     rows, _games = build_tune_path_result(
         path_steps,
@@ -1328,8 +1381,48 @@ def build_tune_path_rows(
         answer_weighting=answer_weighting,
         small_candidate_order=small_candidate_order,
         branch_summary=branch_summary,
+        objective=objective,
     )
     return rows
+
+
+def rank_tune_rows(rows, guess_key, objective="risk"):
+    return sorted(rows, key=lambda row: tune_objective_rank(row, guess_key, objective))
+
+
+def tune_objective_rank(row, guess_key, objective="risk"):
+    average = float(row["average"])
+    if objective == "risk":
+        return (
+            row["risk_score"],
+            average,
+            -row["solved_4_or_less"],
+            row[guess_key],
+        )
+    if objective == "average":
+        return (
+            average,
+            row["risk_score"],
+            -row["solved_4_or_less"],
+            row[guess_key],
+        )
+    if objective == "fives":
+        return (
+            row["fives"],
+            row["sixes"],
+            row["risk_score"],
+            average,
+            row[guess_key],
+        )
+    if objective == "safe-balanced":
+        return (
+            row["sixes"],
+            row["fives"],
+            row["risk_score"],
+            average,
+            row[guess_key],
+        )
+    raise ValueError(f"Unsupported tune-path objective: {objective}")
 
 
 def parse_tune_path(path_steps, allowed_guesses):
@@ -1491,6 +1584,7 @@ def build_strategy_comparison_rows(
     max_expected_guesses=10,
     max_expected_states=50000,
     expected_depth=2,
+    final_cluster_overrides="off",
 ):
     strategy_specs = (
         ("baseline", "", 2),
@@ -1519,6 +1613,7 @@ def build_strategy_comparison_rows(
             max_expected_guesses=max_expected_guesses,
             max_expected_states=max_expected_states,
             expected_depth=expected_depth,
+            final_cluster_overrides=final_cluster_overrides,
         )
         if strategy == "baseline":
             row = {**row, "second_guess_pool": "-"}
@@ -1540,6 +1635,7 @@ def build_strategy_row(
     max_expected_guesses=10,
     max_expected_states=50000,
     expected_depth=2,
+    final_cluster_overrides="off",
 ):
     row, _games = build_strategy_result(
         strategy,
@@ -1555,6 +1651,7 @@ def build_strategy_row(
         max_expected_guesses=max_expected_guesses,
         max_expected_states=max_expected_states,
         expected_depth=expected_depth,
+        final_cluster_overrides=final_cluster_overrides,
     )
     return row
 
@@ -1575,12 +1672,18 @@ def build_strategy_result(
     max_expected_guesses=10,
     max_expected_states=50000,
     expected_depth=2,
+    final_cluster_overrides="off",
+    final_cluster_override_changes=None,
 ):
     if first_guess not in allowed_guesses:
         raise ValueError(f"First guess {first_guess!r} is not in the allowed guess list.")
 
     if strategy == "baseline":
-        if answer_weighting == "off" and small_candidate_order == "normal":
+        if (
+            answer_weighting == "off"
+            and small_candidate_order == "normal"
+            and final_cluster_overrides == "off"
+        ):
             result = run_simulation(
                 allowed_guesses=allowed_guesses,
                 possible_answers=possible_answers,
@@ -1599,6 +1702,8 @@ def build_strategy_result(
                     weighting_changes,
                     small_candidate_order,
                     small_order_changes,
+                    final_cluster_overrides,
+                    final_cluster_override_changes,
                 )
                 for answer in possible_answers
             )
@@ -1664,6 +1769,8 @@ def build_strategy_result(
                 weighting_changes=weighting_changes,
                 small_candidate_order=small_candidate_order,
                 small_order_changes=small_order_changes,
+                final_cluster_overrides=final_cluster_overrides,
+                final_cluster_override_changes=final_cluster_override_changes,
                 use_overrides=effective_use_overrides,
                 second_guess_pool_name=second_guess_pool_name,
             )
@@ -1706,6 +1813,8 @@ def play_second_map_game(
     weighting_changes=None,
     small_candidate_order="normal",
     small_order_changes=None,
+    final_cluster_overrides="off",
+    final_cluster_override_changes=None,
     use_overrides=False,
     second_guess_pool_name="allowed",
 ):
@@ -1761,6 +1870,8 @@ def play_second_map_game(
                 use_expected_strategy,
                 endgame_threshold,
                 expected_optimizer,
+                final_cluster_overrides,
+                final_cluster_override_changes,
             )
         feedback = score_guess(next_guess, answer)
         guesses.append(next_guess)
@@ -1780,6 +1891,8 @@ def play_baseline_game(
     weighting_changes=None,
     small_candidate_order="normal",
     small_order_changes=None,
+    final_cluster_overrides="off",
+    final_cluster_override_changes=None,
 ):
     guesses = []
     candidates = tuple(possible_answers)
@@ -1796,6 +1909,8 @@ def play_baseline_game(
                 len(guesses) + 1,
                 small_candidate_order,
                 small_order_changes,
+                final_cluster_overrides,
+                final_cluster_override_changes,
             )
         else:
             next_guess = first_guess
@@ -1829,6 +1944,8 @@ def choose_answer_candidate(
     guess_number=None,
     small_candidate_order="normal",
     small_order_changes=None,
+    final_cluster_overrides="off",
+    final_cluster_override_changes=None,
 ):
     allowed = set(allowed_guesses)
     previous = set(previous_guesses)
@@ -1843,6 +1960,8 @@ def choose_answer_candidate(
         raise ValueError(f"Unsupported answer weighting mode: {answer_weighting}")
     if small_candidate_order not in {"normal", "likelihood"}:
         raise ValueError(f"Unsupported small-candidate order mode: {small_candidate_order}")
+    if final_cluster_overrides not in {"off", "on"}:
+        raise ValueError(f"Unsupported final-cluster override mode: {final_cluster_overrides}")
 
     unweighted_choice = available_candidates[0]
     base_choice = unweighted_choice
@@ -1861,6 +1980,20 @@ def choose_answer_candidate(
                     "remaining_candidates": tuple(candidates),
                 }
             )
+    if final_cluster_overrides == "on":
+        override_guess = find_final_cluster_override(candidates, previous_guesses)
+        if override_guess is not None and override_guess in available_candidates:
+            if final_cluster_override_changes is not None and override_guess != base_choice:
+                final_cluster_override_changes.append(
+                    {
+                        "answer": answer or "",
+                        "guess_number": guess_number or 0,
+                        "normal_choice": base_choice,
+                        "override_choice": override_guess,
+                        "remaining_candidates": tuple(sorted(candidates)),
+                    }
+                )
+            return override_guess
     if (
         small_candidate_order == "likelihood"
         and len(candidates) in (2, 3)
@@ -1941,6 +2074,16 @@ def choose_small_candidate_by_likelihood(available_candidates):
         if candidate in available:
             return candidate
     return available_candidates[0]
+
+
+def find_final_cluster_override(candidates, previous_guesses):
+    key = tuple(sorted(candidates))
+    override_guess = FINAL_CLUSTER_OVERRIDES.get(key)
+    if override_guess is None or override_guess in previous_guesses:
+        return None
+    if override_guess not in candidates:
+        return None
+    return override_guess
 
 
 def choose_next_candidate_weighted(candidates, previous_guesses, allowed_guesses):
@@ -2083,7 +2226,40 @@ def choose_next_guess_with_optional_probe(
     use_expected_strategy=False,
     endgame_threshold=25,
     expected_optimizer=None,
+    final_cluster_overrides="off",
+    final_cluster_override_changes=None,
 ):
+    if final_cluster_overrides == "on":
+        override_guess = find_final_cluster_override(candidates, previous_guesses)
+        if override_guess is not None:
+            normal_choice = choose_answer_candidate(
+                candidates,
+                previous_guesses,
+                allowed_guesses,
+                answer_weighting,
+                None,
+                answer,
+                guess_number,
+                "normal",
+                None,
+            )
+            if (
+                final_cluster_override_changes is not None
+                and override_guess != normal_choice
+            ):
+                final_cluster_override_changes.append(
+                    {
+                        "answer": answer or "",
+                        "guess_number": guess_number or 0,
+                        "normal_choice": normal_choice,
+                        "override_choice": override_guess,
+                        "remaining_candidates": tuple(sorted(candidates)),
+                    }
+                )
+            return override_guess
+    elif final_cluster_overrides != "off":
+        raise ValueError(f"Unsupported final-cluster override mode: {final_cluster_overrides}")
+
     if (
         use_expected_strategy
         and expected_optimizer is not None
@@ -2322,6 +2498,55 @@ def build_worst_prefix_rows(games, limit, prefix_lengths=(2, 3, 4)):
     return tuple(ranked_rows[:limit])
 
 
+def build_final_cluster_rows(games, possible_answers, limit):
+    grouped_games = defaultdict(list)
+    for game in games:
+        if not game.solved or game.guess_count < 5 or len(game.guesses) < 4:
+            continue
+        candidates = candidates_before_guess(game, possible_answers, guess_number=4)
+        grouped_games[candidates].append(game)
+
+    rows = tuple(
+        format_final_cluster_row(candidates, group)
+        for candidates, group in grouped_games.items()
+    )
+    ranked_rows = sorted(
+        rows,
+        key=lambda row: (-row["risk"], -row["games"], row["candidates"]),
+    )
+    return tuple(ranked_rows[:limit])
+
+
+def candidates_before_guess(game, possible_answers, guess_number):
+    candidates = tuple(possible_answers)
+    for guess in game.guesses[: guess_number - 1]:
+        feedback = score_guess(guess, game.answer)
+        if is_solved(feedback):
+            break
+        candidates = filter_candidates_by_feedback(candidates, guess, feedback)
+    return tuple(sorted(candidates))
+
+
+def format_final_cluster_row(candidates, games):
+    fives = sum(1 for game in games if game.guess_count == 5)
+    sixes = sum(1 for game in games if game.guess_count == 6)
+    risk = fives * 2 + sixes * 5
+    fourth_guesses = Counter(game.guesses[3] for game in games if len(game.guesses) >= 4)
+    fourth_guess_used = ", ".join(
+        guess for guess, _count in sorted(fourth_guesses.items(), key=lambda item: (-item[1], item[0]))[:3]
+    )
+    sample_answers = ", ".join(sorted(game.answer for game in games)[:5])
+    return {
+        "candidates": "/".join(candidates),
+        "games": len(games),
+        "fives": fives,
+        "sixes": sixes,
+        "risk": risk,
+        "fourth_guess_used": fourth_guess_used,
+        "sample_answers": sample_answers,
+    }
+
+
 def format_worst_prefix_row(prefix, games):
     fives = sum(1 for game in games if game.guess_count == 5)
     sixes = sum(1 for game in games if game.guess_count == 6)
@@ -2422,6 +2647,21 @@ def print_worst_prefixes(rows):
         )
 
 
+def print_final_clusters(rows):
+    print("Final clusters:")
+    print("candidates  games  5s  6s  risk  fourth_guess_used  sample_answers")
+    for row in rows:
+        print(
+            f"{row['candidates']:<30} "
+            f"{row['games']:<6} "
+            f"{row['fives']:<3} "
+            f"{row['sixes']:<3} "
+            f"{row['risk']:<5} "
+            f"{row['fourth_guess_used']:<18} "
+            f"{row['sample_answers']}"
+        )
+
+
 def print_weighting_changes(changes, enabled=True, limit=25):
     if not enabled:
         print("Weighting changed decisions: 0")
@@ -2466,6 +2706,30 @@ def print_small_order_changes(changes, enabled=True, limit=25):
             f"{change['guess_number']:<7} "
             f"{change['normal_choice']:<7} "
             f"{change['ordered_choice']:<8} "
+            f"{format_remaining_candidates(change['remaining_candidates'])}"
+        )
+
+
+def print_final_cluster_override_changes(changes, enabled=True, limit=25):
+    if not enabled:
+        print("Final-cluster override changed decisions: 0")
+        print("Games affected: 0")
+        return
+
+    affected_games = {change["answer"] for change in changes if change["answer"]}
+    print(f"Final-cluster override changed decisions: {len(changes)}")
+    print(f"Games affected: {len(affected_games)}")
+    if not changes:
+        return
+
+    print("Final-cluster override examples:")
+    print("answer  guess#  normal  override  remaining_candidates")
+    for change in changes[:limit]:
+        print(
+            f"{change['answer']:<7} "
+            f"{change['guess_number']:<7} "
+            f"{change['normal_choice']:<7} "
+            f"{change['override_choice']:<8} "
             f"{format_remaining_candidates(change['remaining_candidates'])}"
         )
 

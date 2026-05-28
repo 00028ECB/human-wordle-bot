@@ -26,6 +26,7 @@ from src.wordle_lab.__main__ import (
     build_worst_prefix_rows,
     build_strategy_row,
     build_top_opener_rows,
+    build_final_cluster_rows,
     build_second_feedback_branch_summary,
     build_tune_branch_result,
     build_tune_branch_rows,
@@ -40,9 +41,11 @@ from src.wordle_lab.__main__ import (
     choose_hybrid_guess,
     choose_small_candidate_by_likelihood,
     choose_trap_probe,
+    candidates_before_guess,
     differing_letters,
     ExpectedValueOptimizer,
     feedback_bucket_sizes,
+    find_final_cluster_override,
     find_path_guess_override,
     format_candidate_trace_path,
     format_comparison_row,
@@ -52,8 +55,11 @@ from src.wordle_lab.__main__ import (
     is_trap_family,
     main,
     play_second_map_game,
+    print_final_clusters,
+    print_final_cluster_override_changes,
     print_small_order_changes,
     print_worst_prefixes,
+    tune_objective_rank,
     tuned_overrides_enabled,
     worst_csv_path,
     write_worst_games_csv,
@@ -161,6 +167,21 @@ class CliTests(unittest.TestCase):
 
         self.assertTrue(args.branch_summary)
 
+    def test_parser_accepts_tune_path_objective(self):
+        args = build_parser().parse_args(
+            [
+                "--tune-branch",
+                "slate",
+                "....Y",
+                "rocky",
+                "Y....",
+                "--tune-path-objective",
+                "safe-balanced",
+            ]
+        )
+
+        self.assertEqual(args.tune_path_objective, "safe-balanced")
+
     def test_parser_accepts_strategy(self):
         args = build_parser().parse_args(["--strategy", "second-map", "--first", "slate"])
 
@@ -250,6 +271,20 @@ class CliTests(unittest.TestCase):
 
         self.assertTrue(args.show_small_order_changes)
 
+    def test_parser_accepts_final_cluster_overrides(self):
+        args = build_parser().parse_args(
+            [
+                "--strategy",
+                "second-map-bucket",
+                "--final-cluster-overrides",
+                "on",
+                "--show-final-cluster-override-changes",
+            ]
+        )
+
+        self.assertEqual(args.final_cluster_overrides, "on")
+        self.assertTrue(args.show_final_cluster_override_changes)
+
     def test_parser_accepts_no_overrides(self):
         args = build_parser().parse_args(
             ["--strategy", "second-map-bucket", "--no-overrides"]
@@ -312,6 +347,20 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertEqual(args.worst_prefixes, 20)
+
+    def test_parser_accepts_show_final_clusters(self):
+        args = build_parser().parse_args(
+            [
+                "--strategy",
+                "second-map-bucket",
+                "--first",
+                "slate",
+                "--show-final-clusters",
+                "50",
+            ]
+        )
+
+        self.assertEqual(args.show_final_clusters, 50)
 
     def test_parser_accepts_second_guess_pool(self):
         args = build_parser().parse_args(
@@ -667,6 +716,30 @@ class CliTests(unittest.TestCase):
 
         report = output.getvalue()
         self.assertIn("Small-order changed decisions:", report)
+        self.assertIn("Games affected:", report)
+
+    def test_main_reports_final_cluster_override_change_diagnostics(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            main(
+                [
+                    "--answers",
+                    "data/answers.txt",
+                    "--allowed",
+                    "data/allowed_guesses.txt",
+                    "--strategy",
+                    "baseline",
+                    "--first",
+                    "slate",
+                    "--final-cluster-overrides",
+                    "on",
+                    "--show-final-cluster-override-changes",
+                ]
+            )
+
+        report = output.getvalue()
+        self.assertIn("Final-cluster override changed decisions:", report)
         self.assertIn("Games affected:", report)
 
     def test_main_reports_strategy_second_map_hybrid_for_custom_word_lists(self):
@@ -1097,6 +1170,41 @@ class CliTests(unittest.TestCase):
         report = output.getvalue()
         self.assertIn("Worst prefixes:", report)
         self.assertIn("prefix  games  5s", report)
+
+    def test_main_strategy_show_final_clusters_prints_table(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            answers_path.write_text(
+                "caper\ncater\ncaver\ncower\nmower\npower\n",
+                encoding="utf-8",
+            )
+            allowed_path.write_text(
+                "slate\ncrane\ncaper\ncater\ncaver\ncower\nmower\npower\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--strategy",
+                        "baseline",
+                        "--first",
+                        "slate",
+                        "--show-final-clusters",
+                        "3",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("Final clusters:", report)
+        self.assertIn("candidates  games", report)
 
     def test_main_reports_top_openers_table(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1827,6 +1935,93 @@ class CliTests(unittest.TestCase):
         self.assertEqual(changes[0]["normal_choice"], "femur")
         self.assertEqual(changes[0]["ordered_choice"], "fewer")
 
+    def test_find_final_cluster_override_matches_exact_sorted_cluster(self):
+        override = find_final_cluster_override(("fever", "femur", "fewer"), ())
+
+        self.assertEqual(override, "fewer")
+
+    def test_find_final_cluster_override_ignores_partial_cluster(self):
+        override = find_final_cluster_override(("femur", "fewer"), ())
+
+        self.assertIsNone(override)
+
+    def test_find_final_cluster_override_ignores_already_guessed_override(self):
+        override = find_final_cluster_override(
+            ("fever", "femur", "fewer"),
+            ("fewer",),
+        )
+
+        self.assertIsNone(override)
+
+    def test_choose_answer_candidate_applies_final_cluster_override_only_when_on(self):
+        candidates = ("femur", "fever", "fewer")
+        previous_guesses = ("slate", "rocky", "fiend")
+        changes = []
+
+        normal_choice = choose_answer_candidate(
+            candidates,
+            previous_guesses,
+            candidates,
+            "off",
+            answer="fewer",
+            guess_number=4,
+            final_cluster_overrides="off",
+        )
+        override_choice = choose_answer_candidate(
+            candidates,
+            previous_guesses,
+            candidates,
+            "off",
+            answer="fewer",
+            guess_number=4,
+            final_cluster_overrides="on",
+            final_cluster_override_changes=changes,
+        )
+
+        self.assertEqual(normal_choice, "femur")
+        self.assertEqual(override_choice, "fewer")
+        self.assertEqual(changes[0]["normal_choice"], "femur")
+        self.assertEqual(changes[0]["override_choice"], "fewer")
+
+    def test_choose_next_guess_applies_final_cluster_override_before_bucket(self):
+        changes = []
+
+        guess = choose_next_guess_with_optional_probe(
+            ("femur", "fever", "fewer"),
+            ("slate", "rocky", "fiend"),
+            ("femur", "fever", "fewer"),
+            ("femur", "fever", "fewer"),
+            use_trap_avoidance=False,
+            use_bucket_strategy=True,
+            answer="fewer",
+            guess_number=4,
+            final_cluster_overrides="on",
+            final_cluster_override_changes=changes,
+        )
+
+        self.assertEqual(guess, "fewer")
+        self.assertEqual(changes[0]["override_choice"], "fewer")
+
+    def test_print_final_cluster_override_changes_outputs_examples(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_final_cluster_override_changes(
+                (
+                    {
+                        "answer": "fewer",
+                        "guess_number": 4,
+                        "normal_choice": "femur",
+                        "override_choice": "fewer",
+                        "remaining_candidates": ("femur", "fever", "fewer"),
+                    },
+                )
+            )
+
+        report = output.getvalue()
+        self.assertIn("Final-cluster override changed decisions: 1", report)
+        self.assertIn("femur, fever, fewer", report)
+
     def test_print_small_order_changes_outputs_examples(self):
         output = io.StringIO()
 
@@ -1988,6 +2183,69 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rows[0]["risk"], 9)
         self.assertEqual(rows[0]["sample_answers"], "caper, cater, caver")
 
+    def test_candidates_before_guess_reconstructs_remaining_answers(self):
+        game = GameResult(
+            answer="fewer",
+            guesses=("slate", "rocky", "fiend", "femur", "fewer"),
+            solved=True,
+        )
+        answers = ("femur", "fewer", "fever", "caper")
+
+        candidates = candidates_before_guess(game, answers, guess_number=4)
+
+        self.assertEqual(candidates, ("femur", "fever", "fewer"))
+
+    def test_build_final_cluster_rows_groups_by_candidates_before_fourth_guess(self):
+        games = (
+            GameResult(
+                answer="femur",
+                guesses=("slate", "rocky", "fiend", "fewer", "femur"),
+                solved=True,
+            ),
+            GameResult(
+                answer="fewer",
+                guesses=("slate", "rocky", "fiend", "femur", "fewer"),
+                solved=True,
+            ),
+            GameResult(
+                answer="caper",
+                guesses=("slate", "crane", "caper"),
+                solved=True,
+            ),
+        )
+        answers = ("femur", "fewer", "fever", "caper")
+
+        rows = build_final_cluster_rows(games, answers, limit=5)
+
+        self.assertEqual(rows[0]["candidates"], "femur/fever/fewer")
+        self.assertEqual(rows[0]["games"], 2)
+        self.assertEqual(rows[0]["fives"], 2)
+        self.assertEqual(rows[0]["risk"], 4)
+        self.assertIn("femur", rows[0]["fourth_guess_used"])
+        self.assertIn("fewer", rows[0]["sample_answers"])
+
+    def test_print_final_clusters_outputs_table(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_final_clusters(
+                (
+                    {
+                        "candidates": "femur/fewer/fever",
+                        "games": 2,
+                        "fives": 2,
+                        "sixes": 0,
+                        "risk": 4,
+                        "fourth_guess_used": "femur",
+                        "sample_answers": "femur, fewer",
+                    },
+                )
+            )
+
+        report = output.getvalue()
+        self.assertIn("Final clusters:", report)
+        self.assertIn("femur/fewer/fever", report)
+
     def test_print_worst_prefixes_outputs_table(self):
         output = io.StringIO()
 
@@ -2144,6 +2402,60 @@ class CliTests(unittest.TestCase):
                 third_guess_pool=("slate",),
                 third_guess="crane",
             )
+
+    def test_tune_objective_rank_preserves_current_risk_default(self):
+        row = {
+            "next_guess": "bravo",
+            "average": "3.00",
+            "solved_4_or_less": 7,
+            "fives": 2,
+            "sixes": 0,
+            "risk_score": 4,
+        }
+
+        self.assertEqual(tune_objective_rank(row, "next_guess"), (4, 3.0, -7, "bravo"))
+
+    def test_tune_objective_rank_supports_safe_balanced(self):
+        risky_fast = {
+            "next_guess": "alpha",
+            "average": "2.00",
+            "solved_4_or_less": 8,
+            "fives": 0,
+            "sixes": 1,
+            "risk_score": 1,
+        }
+        safer_slow = {
+            "next_guess": "bravo",
+            "average": "4.00",
+            "solved_4_or_less": 4,
+            "fives": 2,
+            "sixes": 0,
+            "risk_score": 4,
+        }
+
+        self.assertLess(
+            tune_objective_rank(safer_slow, "next_guess", "safe-balanced"),
+            tune_objective_rank(risky_fast, "next_guess", "safe-balanced"),
+        )
+
+    def test_tune_objective_rank_supports_average_and_fives(self):
+        row = {
+            "third_guess": "crane",
+            "average": "2.50",
+            "solved_4_or_less": 3,
+            "fives": 1,
+            "sixes": 0,
+            "risk_score": 2,
+        }
+
+        self.assertEqual(
+            tune_objective_rank(row, "third_guess", "average"),
+            (2.5, 2, -3, "crane"),
+        )
+        self.assertEqual(
+            tune_objective_rank(row, "third_guess", "fives"),
+            (1, 0, 2, 2.5, "crane"),
+        )
 
     def test_build_tune_path_rows_ranks_next_guesses(self):
         allowed_words = ("raise", "slate", "crane", "trace")
@@ -2832,9 +3144,21 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             main(["--strategy", "baseline", "--first", "slate", "--worst-prefixes", "0"])
 
+    def test_show_final_clusters_requires_strategy(self):
+        with self.assertRaises(SystemExit):
+            main(["--show-final-clusters", "5"])
+
+    def test_show_final_clusters_requires_positive_limit(self):
+        with self.assertRaises(SystemExit):
+            main(["--strategy", "baseline", "--first", "slate", "--show-final-clusters", "0"])
+
     def test_show_small_order_changes_requires_strategy(self):
         with self.assertRaises(SystemExit):
             main(["--show-small-order-changes"])
+
+    def test_show_final_cluster_override_changes_requires_strategy(self):
+        with self.assertRaises(SystemExit):
+            main(["--show-final-cluster-override-changes"])
 
     def test_trap_threshold_requires_positive_limit(self):
         with self.assertRaises(SystemExit):

@@ -148,6 +148,8 @@ Use `--answer-weighting simple` to prefer more Wordle-like answer candidates whe
 
 Built-in pattern and path overrides are tuned for `second-map-bucket`. They apply by default only to `second-map-bucket`, so baseline, second-map, trap, and hybrid comparisons stay untuned unless code explicitly opts in. Use `--no-overrides` with `second-map-bucket` to compare against the unmodified second-map recommendation.
 
+`--final-cluster-overrides on` is experimental. Exact final-cluster overrides can reduce 5-guess games but may introduce 6-guess games. For the current uniform full-list benchmark, the recommended champion strategy keeps `--final-cluster-overrides off`, which is also the default.
+
 Use `--compare-strategies` to run the built-in `slate` leaderboard across baseline, second-map, trap, and bucket strategies with both answer-only and allowed second-guess pools.
 
 ## Word Lists
