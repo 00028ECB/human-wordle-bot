@@ -125,10 +125,26 @@ SECOND_GUESS_OVERRIDES = {
     ("slate", "..YY.", "answers"): "pouch",
     ("slate", ".YY..", "answers"): "rally",
     ("slate", ".Y...", "answers"): "dilly",
+    ("slate", "G..Y.", "answers"): "count",
+    ("slate", "..G..", "answers"): "grind",
+    ("slate", "Y....", "answers"): "missy",
 }
 
 PATH_GUESS_OVERRIDES = {
+    ("slate", ".....", "frond", ".....", "answers"): "chump",
     ("slate", ".....", "frond", "..Y..", "answers"): "pouch",
+}
+
+SMALL_CANDIDATE_ORDER_PREFERENCES = {
+    # Explicit mini-family preferences. Keys are sorted so lookup is stable.
+    ("femur", "fewer"): ("fewer", "femur"),
+    ("piper", "viper"): ("viper", "piper"),
+    ("ember", "upper"): ("ember", "upper"),
+    ("biddy", "giddy"): ("giddy", "biddy"),
+    ("frank", "prank"): ("prank", "frank"),
+    ("pried", "weird"): ("weird", "pried"),
+    ("breed", "greed"): ("greed", "breed"),
+    ("brief", "grief"): ("grief", "brief"),
 }
 
 
@@ -221,6 +237,7 @@ def build_parser():
             "second-map",
             "second-map-trap",
             "second-map-bucket",
+            "second-map-expected",
             "second-map-hybrid",
         ),
         help="test a fixed first-word strategy",
@@ -230,6 +247,11 @@ def build_parser():
         type=int,
         metavar="N",
         help="show the N worst solved games for --strategy",
+    )
+    parser.add_argument(
+        "--show-candidate-trace",
+        action="store_true",
+        help="include remaining candidate counts in --show-worst paths for --strategy",
     )
     parser.add_argument(
         "--show-pattern-worst",
@@ -246,11 +268,45 @@ def build_parser():
         help="show first-feedback patterns ranked by risk for --strategy",
     )
     parser.add_argument(
+        "--worst-prefixes",
+        type=int,
+        metavar="N",
+        help="show path prefixes with the most 5+ guess solved games for --strategy",
+    )
+    parser.add_argument(
         "--trap-threshold",
         type=int,
         default=2,
         metavar="N",
         help="max bucket threshold for --strategy second-map-hybrid (default: 2)",
+    )
+    parser.add_argument(
+        "--endgame-threshold",
+        type=int,
+        default=10,
+        metavar="N",
+        help="candidate count for --strategy second-map-expected EV search (default: 10)",
+    )
+    parser.add_argument(
+        "--max-expected-guesses",
+        type=int,
+        default=10,
+        metavar="M",
+        help="maximum candidate guesses to evaluate in expected-value search (default: 10)",
+    )
+    parser.add_argument(
+        "--max-expected-states",
+        type=int,
+        default=50000,
+        metavar="N",
+        help="maximum memoized expected-value states before bucket fallback (default: 50000)",
+    )
+    parser.add_argument(
+        "--expected-depth",
+        type=int,
+        default=2,
+        metavar="D",
+        help="recursive lookahead depth for expected-value search (default: 2)",
     )
     parser.add_argument(
         "--no-overrides",
@@ -274,6 +330,17 @@ def build_parser():
         "--show-weighting-changes",
         action="store_true",
         help="show where --answer-weighting simple changes answer-candidate choices",
+    )
+    parser.add_argument(
+        "--small-candidate-order",
+        choices=("normal", "likelihood"),
+        default="normal",
+        help="ordering mode for 2-3 remaining answer candidates (default: normal)",
+    )
+    parser.add_argument(
+        "--show-small-order-changes",
+        action="store_true",
+        help="show where --small-candidate-order likelihood changes small-candidate choices",
     )
     parser.add_argument(
         "--branch-summary",
@@ -314,14 +381,32 @@ def main(argv=None):
         raise SystemExit("--limit-openers must be at least 1")
     if args.show_worst is not None and args.show_worst < 1:
         raise SystemExit("--show-worst must be at least 1")
+    if args.show_candidate_trace and not args.strategy:
+        raise SystemExit("--show-candidate-trace can only be used with --strategy")
+    if args.show_candidate_trace and not args.show_worst:
+        raise SystemExit("--show-candidate-trace requires --show-worst")
     if args.show_pattern_worst is not None and args.show_pattern_worst < 1:
         raise SystemExit("--show-pattern-worst must be at least 1")
     if args.worst_patterns is not None and args.worst_patterns == 0:
         raise SystemExit("--worst-patterns must be at least 1 when a limit is provided")
     if args.worst_patterns is not None and not args.strategy:
         raise SystemExit("--worst-patterns can only be used with --strategy")
+    if args.worst_prefixes is not None and args.worst_prefixes < 1:
+        raise SystemExit("--worst-prefixes must be at least 1")
+    if args.worst_prefixes is not None and not args.strategy:
+        raise SystemExit("--worst-prefixes can only be used with --strategy")
+    if args.show_small_order_changes and not args.strategy:
+        raise SystemExit("--show-small-order-changes can only be used with --strategy")
     if args.trap_threshold < 1:
         raise SystemExit("--trap-threshold must be at least 1")
+    if args.endgame_threshold < 1:
+        raise SystemExit("--endgame-threshold must be at least 1")
+    if args.max_expected_guesses < 1:
+        raise SystemExit("--max-expected-guesses must be at least 1")
+    if args.max_expected_states < 1:
+        raise SystemExit("--max-expected-states must be at least 1")
+    if args.expected_depth < 1:
+        raise SystemExit("--expected-depth must be at least 1")
     if args.top < 1:
         raise SystemExit("--top must be at least 1")
 
@@ -339,6 +424,7 @@ def main(argv=None):
             possible_answers,
             use_overrides=False if args.no_overrides else None,
             answer_weighting=args.answer_weighting,
+            small_candidate_order=args.small_candidate_order,
         )
         print_strategy_report(rows)
         if args.csv:
@@ -361,6 +447,7 @@ def main(argv=None):
                 second_guess=args.second.lower() if args.second else None,
                 trap_threshold=args.trap_threshold,
                 answer_weighting=args.answer_weighting,
+                small_candidate_order=args.small_candidate_order,
                 branch_summary=args.branch_summary,
             )
         except ValueError as error:
@@ -391,6 +478,7 @@ def main(argv=None):
                 third_guess=args.second.lower() if args.second else None,
                 trap_threshold=args.trap_threshold,
                 answer_weighting=args.answer_weighting,
+                small_candidate_order=args.small_candidate_order,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -415,6 +503,7 @@ def main(argv=None):
                 next_guess=args.second.lower() if args.second else None,
                 trap_threshold=args.trap_threshold,
                 answer_weighting=args.answer_weighting,
+                small_candidate_order=args.small_candidate_order,
                 branch_summary=args.branch_summary,
             )
         except ValueError as error:
@@ -427,6 +516,8 @@ def main(argv=None):
         return
     if args.strategy:
         weighting_changes = []
+        small_order_changes = []
+        start_time = time.perf_counter()
         try:
             row, games = build_strategy_result(
                 args.strategy,
@@ -435,21 +526,43 @@ def main(argv=None):
                 possible_answers,
                 second_guess_pool_name=args.second_guess_pool,
                 trap_threshold=args.trap_threshold,
+                endgame_threshold=args.endgame_threshold,
+                max_expected_guesses=args.max_expected_guesses,
+                max_expected_states=args.max_expected_states,
+                expected_depth=args.expected_depth,
                 use_overrides=False if args.no_overrides else None,
                 answer_weighting=args.answer_weighting,
                 weighting_changes=weighting_changes if args.show_weighting_changes else None,
+                small_candidate_order=args.small_candidate_order,
+                small_order_changes=(
+                    small_order_changes if args.show_small_order_changes else None
+                ),
             )
         except ValueError as error:
             parser.error(str(error))
+        elapsed_seconds = time.perf_counter() - start_time
         print_strategy_report((row,))
+        if args.strategy == "second-map-expected":
+            print_expected_diagnostics(row, elapsed_seconds)
         if args.show_weighting_changes:
             print_weighting_changes(weighting_changes, enabled=args.answer_weighting == "simple")
+        if args.show_small_order_changes:
+            print_small_order_changes(
+                small_order_changes,
+                enabled=args.small_candidate_order == "likelihood",
+            )
         worst_rows = ()
         if args.worst_patterns is not None:
             pattern_limit = None if args.worst_patterns == -1 else args.worst_patterns
             print_worst_patterns(build_worst_pattern_rows(games, pattern_limit))
+        if args.worst_prefixes:
+            print_worst_prefixes(build_worst_prefix_rows(games, args.worst_prefixes))
         if args.show_worst:
-            worst_rows = build_worst_game_rows(games, args.show_worst)
+            worst_rows = build_worst_game_rows(
+                games,
+                args.show_worst,
+                possible_answers if args.show_candidate_trace else None,
+            )
             print_worst_games(worst_rows)
         if args.csv:
             write_strategy_csv(args.csv, (row,))
@@ -539,6 +652,12 @@ def print_timing_report(elapsed_seconds, opener_count):
     print(f"Average seconds per opener: {average_seconds:.4f}")
 
 
+def print_expected_diagnostics(row, elapsed_seconds):
+    print(f"Expected-value states: {row.get('expected_states', 0)}")
+    print(f"Expected-value fallbacks: {row.get('expected_fallbacks', 0)}")
+    print(f"Elapsed seconds: {elapsed_seconds:.2f}")
+
+
 def build_tune_pattern_rows(
     first_guess,
     pattern,
@@ -549,6 +668,7 @@ def build_tune_pattern_rows(
     top=25,
     trap_threshold=2,
     answer_weighting="off",
+    small_candidate_order="normal",
     branch_summary=False,
 ):
     rows, _games = build_tune_pattern_result(
@@ -561,6 +681,7 @@ def build_tune_pattern_rows(
         top=top,
         trap_threshold=trap_threshold,
         answer_weighting=answer_weighting,
+        small_candidate_order=small_candidate_order,
         branch_summary=branch_summary,
     )
     return rows
@@ -577,6 +698,7 @@ def build_tune_pattern_result(
     second_guess=None,
     trap_threshold=2,
     answer_weighting="off",
+    small_candidate_order="normal",
     branch_summary=False,
 ):
     validate_tune_pattern(first_guess, pattern, strategy, allowed_guesses)
@@ -604,6 +726,7 @@ def build_tune_pattern_result(
                 second_guess_pool,
                 trap_threshold,
                 answer_weighting,
+                small_candidate_order,
             )
             for answer in candidates
         )
@@ -642,6 +765,7 @@ def validate_tune_pattern(first_guess, pattern, strategy, allowed_guesses):
         "second-map",
         "second-map-trap",
         "second-map-bucket",
+        "second-map-expected",
         "second-map-hybrid",
     }:
         raise ValueError(f"Unsupported strategy: {strategy}")
@@ -701,7 +825,7 @@ def tuned_overrides_enabled(strategy, use_overrides):
         return False
     if use_overrides is True:
         return True
-    return strategy == "second-map-bucket"
+    return strategy in {"second-map-bucket", "second-map-expected"}
 
 
 def play_tuned_pattern_game(
@@ -715,6 +839,7 @@ def play_tuned_pattern_game(
     probe_pool,
     trap_threshold,
     answer_weighting="off",
+    small_candidate_order="normal",
 ):
     guesses = [first_guess]
     if is_solved(pattern):
@@ -735,6 +860,7 @@ def play_tuned_pattern_game(
             probe_pool,
             trap_threshold,
             answer_weighting,
+            small_candidate_order,
         )
         feedback = score_guess(next_guess, answer)
         guesses.append(next_guess)
@@ -757,6 +883,10 @@ def choose_later_strategy_guess(
     probe_pool,
     trap_threshold,
     answer_weighting="off",
+    small_candidate_order="normal",
+    small_order_changes=None,
+    answer=None,
+    guess_number=None,
 ):
     return choose_next_guess_with_optional_probe(
         candidates,
@@ -764,10 +894,14 @@ def choose_later_strategy_guess(
         allowed_guesses,
         probe_pool,
         use_trap_avoidance=(strategy == "second-map-trap"),
-        use_bucket_strategy=(strategy == "second-map-bucket"),
+        use_bucket_strategy=(strategy in {"second-map-bucket", "second-map-expected"}),
         use_hybrid_strategy=(strategy == "second-map-hybrid"),
         trap_threshold=trap_threshold,
         answer_weighting=answer_weighting,
+        small_candidate_order=small_candidate_order,
+        small_order_changes=small_order_changes,
+        answer=answer,
+        guess_number=guess_number,
     )
 
 
@@ -890,6 +1024,7 @@ def build_tune_branch_result(
     third_guess=None,
     trap_threshold=2,
     answer_weighting="off",
+    small_candidate_order="normal",
 ):
     validate_tune_pattern(first_guess, first_pattern, strategy, allowed_guesses)
     if second_guess not in allowed_guesses:
@@ -929,6 +1064,7 @@ def build_tune_branch_result(
                 third_guess_pool,
                 trap_threshold,
                 answer_weighting,
+                small_candidate_order,
             )
             for answer in candidates
         )
@@ -969,6 +1105,7 @@ def build_tune_branch_rows(
     top=25,
     trap_threshold=2,
     answer_weighting="off",
+    small_candidate_order="normal",
 ):
     rows, _games = build_tune_branch_result(
         first_guess,
@@ -982,6 +1119,7 @@ def build_tune_branch_rows(
         top=top,
         trap_threshold=trap_threshold,
         answer_weighting=answer_weighting,
+        small_candidate_order=small_candidate_order,
     )
     return rows
 
@@ -999,6 +1137,7 @@ def play_tuned_branch_game(
     probe_pool,
     trap_threshold,
     answer_weighting="off",
+    small_candidate_order="normal",
 ):
     guesses = [first_guess]
     if is_solved(first_pattern):
@@ -1023,6 +1162,7 @@ def play_tuned_branch_game(
             probe_pool,
             trap_threshold,
             answer_weighting,
+            small_candidate_order,
         )
         feedback = score_guess(next_guess, answer)
         guesses.append(next_guess)
@@ -1091,6 +1231,7 @@ def build_tune_path_result(
     next_guess=None,
     trap_threshold=2,
     answer_weighting="off",
+    small_candidate_order="normal",
     branch_summary=False,
 ):
     path_guesses, path_patterns = parse_tune_path(path_steps, allowed_guesses)
@@ -1118,6 +1259,7 @@ def build_tune_path_result(
                 next_guess_pool,
                 trap_threshold,
                 answer_weighting,
+                small_candidate_order,
             )
             for answer in candidates
         )
@@ -1156,6 +1298,7 @@ def build_tune_path_result(
                 next_guess_pool,
                 trap_threshold,
                 answer_weighting,
+                small_candidate_order,
             )
             for answer in candidates
         )
@@ -1171,6 +1314,7 @@ def build_tune_path_rows(
     top=25,
     trap_threshold=2,
     answer_weighting="off",
+    small_candidate_order="normal",
     branch_summary=False,
 ):
     rows, _games = build_tune_path_result(
@@ -1182,6 +1326,7 @@ def build_tune_path_rows(
         top=top,
         trap_threshold=trap_threshold,
         answer_weighting=answer_weighting,
+        small_candidate_order=small_candidate_order,
         branch_summary=branch_summary,
     )
     return rows
@@ -1210,6 +1355,7 @@ def validate_tune_path_strategy(strategy):
         "second-map",
         "second-map-trap",
         "second-map-bucket",
+        "second-map-expected",
         "second-map-hybrid",
     }:
         raise ValueError(f"Unsupported strategy: {strategy}")
@@ -1242,6 +1388,7 @@ def play_tuned_path_game(
     probe_pool,
     trap_threshold,
     answer_weighting="off",
+    small_candidate_order="normal",
 ):
     guesses = list(path_guesses)
     feedback = score_guess(next_guess, answer)
@@ -1263,6 +1410,7 @@ def play_tuned_path_game(
             probe_pool,
             trap_threshold,
             answer_weighting,
+            small_candidate_order,
         )
         feedback = score_guess(later_guess, answer)
         guesses.append(later_guess)
@@ -1338,6 +1486,11 @@ def build_strategy_comparison_rows(
     first_guess="slate",
     use_overrides=None,
     answer_weighting="off",
+    small_candidate_order="normal",
+    endgame_threshold=25,
+    max_expected_guesses=10,
+    max_expected_states=50000,
+    expected_depth=2,
 ):
     strategy_specs = (
         ("baseline", "", 2),
@@ -1361,6 +1514,11 @@ def build_strategy_comparison_rows(
             trap_threshold=trap_threshold,
             use_overrides=use_overrides,
             answer_weighting=answer_weighting,
+            small_candidate_order=small_candidate_order,
+            endgame_threshold=endgame_threshold,
+            max_expected_guesses=max_expected_guesses,
+            max_expected_states=max_expected_states,
+            expected_depth=expected_depth,
         )
         if strategy == "baseline":
             row = {**row, "second_guess_pool": "-"}
@@ -1377,6 +1535,11 @@ def build_strategy_row(
     trap_threshold=2,
     use_overrides=None,
     answer_weighting="off",
+    small_candidate_order="normal",
+    endgame_threshold=25,
+    max_expected_guesses=10,
+    max_expected_states=50000,
+    expected_depth=2,
 ):
     row, _games = build_strategy_result(
         strategy,
@@ -1387,6 +1550,11 @@ def build_strategy_row(
         trap_threshold=trap_threshold,
         use_overrides=use_overrides,
         answer_weighting=answer_weighting,
+        small_candidate_order=small_candidate_order,
+        endgame_threshold=endgame_threshold,
+        max_expected_guesses=max_expected_guesses,
+        max_expected_states=max_expected_states,
+        expected_depth=expected_depth,
     )
     return row
 
@@ -1401,12 +1569,18 @@ def build_strategy_result(
     use_overrides=None,
     answer_weighting="off",
     weighting_changes=None,
+    small_candidate_order="normal",
+    small_order_changes=None,
+    endgame_threshold=25,
+    max_expected_guesses=10,
+    max_expected_states=50000,
+    expected_depth=2,
 ):
     if first_guess not in allowed_guesses:
         raise ValueError(f"First guess {first_guess!r} is not in the allowed guess list.")
 
     if strategy == "baseline":
-        if answer_weighting == "off":
+        if answer_weighting == "off" and small_candidate_order == "normal":
             result = run_simulation(
                 allowed_guesses=allowed_guesses,
                 possible_answers=possible_answers,
@@ -1423,6 +1597,8 @@ def build_strategy_result(
                     first_guess,
                     answer_weighting,
                     weighting_changes,
+                    small_candidate_order,
+                    small_order_changes,
                 )
                 for answer in possible_answers
             )
@@ -1438,6 +1614,7 @@ def build_strategy_result(
         "second-map",
         "second-map-trap",
         "second-map-bucket",
+        "second-map-expected",
         "second-map-hybrid",
     }:
         effective_use_overrides = tuned_overrides_enabled(strategy, use_overrides)
@@ -1460,6 +1637,14 @@ def build_strategy_result(
                 second_guess_pool,
                 second_guess_by_pattern,
             )
+        expected_optimizer = None
+        if strategy == "second-map-expected":
+            expected_optimizer = ExpectedValueOptimizer(
+                second_guess_pool,
+                max_guesses=max_expected_guesses,
+                max_states=max_expected_states,
+                max_depth=expected_depth,
+            )
         games = tuple(
             play_second_map_game(
                 answer,
@@ -1468,24 +1653,37 @@ def build_strategy_result(
                 first_guess,
                 second_guess_by_pattern,
                 use_trap_avoidance=(strategy == "second-map-trap"),
-                use_bucket_strategy=(strategy == "second-map-bucket"),
+                use_bucket_strategy=(strategy in {"second-map-bucket", "second-map-expected"}),
+                use_expected_strategy=(strategy == "second-map-expected"),
                 use_hybrid_strategy=(strategy == "second-map-hybrid"),
                 trap_threshold=trap_threshold,
+                endgame_threshold=endgame_threshold,
                 probe_pool=second_guess_pool,
+                expected_optimizer=expected_optimizer,
                 answer_weighting=answer_weighting,
                 weighting_changes=weighting_changes,
+                small_candidate_order=small_candidate_order,
+                small_order_changes=small_order_changes,
                 use_overrides=effective_use_overrides,
                 second_guess_pool_name=second_guess_pool_name,
             )
             for answer in possible_answers
         )
         summary = build_summary_row_from_games(first_guess, games)
-        return {
+        row = {
             "strategy": strategy,
             "first_guess": first_guess,
             "second_guess_pool": second_guess_pool_name,
             **summary,
-        }, games
+        }
+        if expected_optimizer is not None:
+            row.update(
+                {
+                    "expected_states": expected_optimizer.state_count,
+                    "expected_fallbacks": expected_optimizer.fallback_count,
+                }
+            )
+        return row, games
 
     raise ValueError(f"Unsupported strategy: {strategy}")
 
@@ -1498,11 +1696,16 @@ def play_second_map_game(
     second_guess_by_pattern,
     use_trap_avoidance=False,
     use_bucket_strategy=False,
+    use_expected_strategy=False,
     use_hybrid_strategy=False,
     trap_threshold=2,
+    endgame_threshold=25,
     probe_pool=None,
+    expected_optimizer=None,
     answer_weighting="off",
     weighting_changes=None,
+    small_candidate_order="normal",
+    small_order_changes=None,
     use_overrides=False,
     second_guess_pool_name="allowed",
 ):
@@ -1551,8 +1754,13 @@ def play_second_map_game(
                 trap_threshold,
                 answer_weighting,
                 weighting_changes,
+                small_candidate_order,
+                small_order_changes,
                 answer,
                 len(guesses) + 1,
+                use_expected_strategy,
+                endgame_threshold,
+                expected_optimizer,
             )
         feedback = score_guess(next_guess, answer)
         guesses.append(next_guess)
@@ -1570,6 +1778,8 @@ def play_baseline_game(
     first_guess,
     answer_weighting="off",
     weighting_changes=None,
+    small_candidate_order="normal",
+    small_order_changes=None,
 ):
     guesses = []
     candidates = tuple(possible_answers)
@@ -1584,6 +1794,8 @@ def play_baseline_game(
                 weighting_changes,
                 answer,
                 len(guesses) + 1,
+                small_candidate_order,
+                small_order_changes,
             )
         else:
             next_guess = first_guess
@@ -1615,6 +1827,8 @@ def choose_answer_candidate(
     weighting_changes=None,
     answer=None,
     guess_number=None,
+    small_candidate_order="normal",
+    small_order_changes=None,
 ):
     allowed = set(allowed_guesses)
     previous = set(previous_guesses)
@@ -1625,26 +1839,46 @@ def choose_answer_candidate(
     ]
     if not available_candidates:
         raise RuntimeError("No remaining candidate is available as a new guess.")
+    if answer_weighting not in {"off", "simple"}:
+        raise ValueError(f"Unsupported answer weighting mode: {answer_weighting}")
+    if small_candidate_order not in {"normal", "likelihood"}:
+        raise ValueError(f"Unsupported small-candidate order mode: {small_candidate_order}")
+
+    unweighted_choice = available_candidates[0]
+    base_choice = unweighted_choice
     if answer_weighting == "simple":
-        weighted_choice = max(
+        base_choice = max(
             available_candidates,
             key=lambda candidate: (answer_likelihood_score(candidate), -candidates.index(candidate)),
         )
-        unweighted_choice = available_candidates[0]
-        if weighting_changes is not None and weighted_choice != unweighted_choice:
+        if weighting_changes is not None and base_choice != unweighted_choice:
             weighting_changes.append(
                 {
                     "answer": answer or "",
                     "guess_number": guess_number or 0,
                     "unweighted_choice": unweighted_choice,
-                    "weighted_choice": weighted_choice,
+                    "weighted_choice": base_choice,
                     "remaining_candidates": tuple(candidates),
                 }
             )
-        return weighted_choice
-    if answer_weighting != "off":
-        raise ValueError(f"Unsupported answer weighting mode: {answer_weighting}")
-    return available_candidates[0]
+    if (
+        small_candidate_order == "likelihood"
+        and len(candidates) in (2, 3)
+        and (guess_number or 0) >= 4
+    ):
+        ordered_choice = choose_small_candidate_by_likelihood(available_candidates)
+        if small_order_changes is not None and ordered_choice != base_choice:
+            small_order_changes.append(
+                {
+                    "answer": answer or "",
+                    "guess_number": guess_number or 0,
+                    "normal_choice": base_choice,
+                    "ordered_choice": ordered_choice,
+                    "remaining_candidates": tuple(candidates),
+                }
+            )
+        return ordered_choice
+    return base_choice
 
 
 def answer_likelihood_score(word):
@@ -1697,6 +1931,18 @@ def answer_likelihood_score(word):
     return score
 
 
+def choose_small_candidate_by_likelihood(available_candidates):
+    preference_key = tuple(sorted(available_candidates))
+    preferred_order = SMALL_CANDIDATE_ORDER_PREFERENCES.get(preference_key)
+    if not preferred_order:
+        return available_candidates[0]
+    available = set(available_candidates)
+    for candidate in preferred_order:
+        if candidate in available:
+            return candidate
+    return available_candidates[0]
+
+
 def choose_next_candidate_weighted(candidates, previous_guesses, allowed_guesses):
     return choose_answer_candidate(candidates, previous_guesses, allowed_guesses, "simple")
 
@@ -1712,6 +1958,113 @@ def choose_next_candidate_from_available(candidates, previous_guesses, allowed_g
     raise RuntimeError("No remaining candidate is available as a new guess.")
 
 
+class ExpectedValueOptimizer:
+    def __init__(self, guess_pool, max_guesses=10, max_states=50000, max_depth=2):
+        self.guess_pool = tuple(guess_pool)
+        self.max_guesses = max_guesses
+        self.max_states = max_states
+        self.max_depth = max_depth
+        self.state_count = 0
+        self.fallback_count = 0
+
+    def choose_guess(self, candidates, previous_guesses=()):
+        candidates = tuple(candidates)
+        previous_guesses = tuple(previous_guesses)
+        if not candidates:
+            raise RuntimeError("No remaining candidates for expected-value search.")
+        if len(candidates) == 1:
+            return candidates[0]
+        if self.state_count >= self.max_states:
+            self.fallback_count += 1
+            return self.bucket_fallback_guess(candidates, previous_guesses)
+
+        best_guess = None
+        best_rank = None
+        for guess in self._candidate_guesses(candidates, previous_guesses):
+            expected_guesses = self._guess_expected_total(
+                guess,
+                candidates,
+                previous_guesses,
+                self.max_depth,
+            )
+            if expected_guesses == float("inf"):
+                continue
+            rank = (expected_guesses, guess not in candidates, guess)
+            if best_rank is None or rank < best_rank:
+                best_guess = guess
+                best_rank = rank
+
+        if best_guess is None:
+            self.fallback_count += 1
+            return self.bucket_fallback_guess(candidates, previous_guesses)
+        return best_guess
+
+    @cache
+    def expected_total(self, candidates, previous_guesses, depth_remaining):
+        self.state_count += 1
+        candidates = tuple(candidates)
+        previous_guesses = tuple(previous_guesses)
+        if len(candidates) <= 1:
+            return 1.0
+        if depth_remaining <= 0 or self.state_count >= self.max_states:
+            return self.estimate_remaining(candidates)
+
+        best_value = float("inf")
+        for guess in self._candidate_guesses(candidates, previous_guesses):
+            value = self._guess_expected_total(
+                guess,
+                candidates,
+                previous_guesses,
+                depth_remaining,
+            )
+            if value < best_value:
+                best_value = value
+        return best_value
+
+    def _guess_expected_total(self, guess, candidates, previous_guesses, depth_remaining):
+        buckets = self._feedback_buckets(guess, candidates)
+        total = 1.0
+        candidate_count = len(candidates)
+        next_previous = tuple((*previous_guesses, guess))
+
+        for feedback, bucket in buckets.items():
+            if is_solved(feedback):
+                continue
+            next_candidates = tuple(bucket)
+            if next_candidates == candidates:
+                return float("inf")
+            total += (
+                len(next_candidates)
+                / candidate_count
+                * self.expected_total(next_candidates, next_previous, depth_remaining - 1)
+            )
+        return total
+
+    def estimate_remaining(self, candidates):
+        bucket_count = max(1, len(set(score_guess(candidates[0], answer) for answer in candidates)))
+        return max(1.0, len(candidates) / bucket_count)
+
+    def bucket_fallback_guess(self, candidates, previous_guesses):
+        probe = choose_bucket_probe(candidates, previous_guesses, self.guess_pool)
+        if probe is not None:
+            return probe
+        return choose_answer_candidate(candidates, previous_guesses, candidates, "off")
+
+    def _feedback_buckets(self, guess, candidates):
+        buckets = defaultdict(list)
+        for candidate in candidates:
+            buckets[score_guess(guess, candidate)].append(candidate)
+        return buckets
+
+    def _candidate_guesses(self, candidates, previous_guesses):
+        previous = set(previous_guesses)
+        ranked_guesses = sorted(
+            (guess for guess in candidates if guess in self.guess_pool and guess not in previous),
+            key=lambda guess: bucket_probe_rank(guess, candidates),
+        )
+        return tuple(ranked_guesses[: self.max_guesses])
+
+
 def choose_next_guess_with_optional_probe(
     candidates,
     previous_guesses,
@@ -1723,9 +2076,32 @@ def choose_next_guess_with_optional_probe(
     trap_threshold=2,
     answer_weighting="off",
     weighting_changes=None,
+    small_candidate_order="normal",
+    small_order_changes=None,
     answer=None,
     guess_number=None,
+    use_expected_strategy=False,
+    endgame_threshold=25,
+    expected_optimizer=None,
 ):
+    if (
+        use_expected_strategy
+        and expected_optimizer is not None
+        and len(candidates) <= endgame_threshold
+    ):
+        return expected_optimizer.choose_guess(candidates, previous_guesses)
+    if small_candidate_order == "likelihood" and len(candidates) in (2, 3):
+        return choose_answer_candidate(
+            candidates,
+            previous_guesses,
+            allowed_guesses,
+            answer_weighting,
+            weighting_changes,
+            answer,
+            guess_number,
+            small_candidate_order,
+            small_order_changes,
+        )
     if use_hybrid_strategy:
         return choose_hybrid_guess(
             candidates,
@@ -1735,6 +2111,8 @@ def choose_next_guess_with_optional_probe(
             trap_threshold,
             answer_weighting,
             weighting_changes,
+            small_candidate_order,
+            small_order_changes,
             answer,
             guess_number,
         )
@@ -1750,6 +2128,8 @@ def choose_next_guess_with_optional_probe(
             weighting_changes,
             answer,
             guess_number,
+            small_candidate_order,
+            small_order_changes,
         )
     if use_trap_avoidance and is_trap_family(candidates):
         probe = choose_trap_probe(candidates, previous_guesses, probe_pool)
@@ -1763,6 +2143,8 @@ def choose_next_guess_with_optional_probe(
         weighting_changes,
         answer,
         guess_number,
+        small_candidate_order,
+        small_order_changes,
     )
 
 
@@ -1774,6 +2156,8 @@ def choose_hybrid_guess(
     trap_threshold,
     answer_weighting="off",
     weighting_changes=None,
+    small_candidate_order="normal",
+    small_order_changes=None,
     answer=None,
     guess_number=None,
 ):
@@ -1785,6 +2169,8 @@ def choose_hybrid_guess(
         weighting_changes,
         answer,
         guess_number,
+        small_candidate_order,
+        small_order_changes,
     )
     normal_max_bucket = max(feedback_bucket_sizes(normal_guess, candidates))
     if normal_max_bucket > trap_threshold:
@@ -1882,13 +2268,15 @@ def build_summary_row_from_games(first_guess, games):
     )
 
 
-def build_worst_game_rows(games, limit):
+def build_worst_game_rows(games, limit, possible_answers=None):
     solved_games = [game for game in games if game.solved]
     worst_games = sorted(
         solved_games,
         key=lambda game: (-game.guess_count, game.answer),
     )
-    return tuple(format_worst_game_row(game) for game in worst_games[:limit])
+    return tuple(
+        format_worst_game_row(game, possible_answers) for game in worst_games[:limit]
+    )
 
 
 def build_worst_pattern_rows(games, limit=None):
@@ -1907,6 +2295,46 @@ def build_worst_pattern_rows(games, limit=None):
     if limit is None:
         return tuple(ranked_rows)
     return tuple(ranked_rows[:limit])
+
+
+def build_worst_prefix_rows(games, limit, prefix_lengths=(2, 3, 4)):
+    grouped_games = defaultdict(list)
+    for game in games:
+        if not game.solved or game.guess_count < 5:
+            continue
+        for prefix_length in prefix_lengths:
+            if len(game.guesses) >= prefix_length:
+                grouped_games[game.guesses[:prefix_length]].append(game)
+
+    rows = tuple(
+        format_worst_prefix_row(prefix, group)
+        for prefix, group in grouped_games.items()
+    )
+    ranked_rows = sorted(
+        rows,
+        key=lambda row: (
+            -row["risk"],
+            -row["fives"],
+            -row["sixes"],
+            row["prefix"],
+        ),
+    )
+    return tuple(ranked_rows[:limit])
+
+
+def format_worst_prefix_row(prefix, games):
+    fives = sum(1 for game in games if game.guess_count == 5)
+    sixes = sum(1 for game in games if game.guess_count == 6)
+    risk = fives * 2 + sixes * 5
+    sample_answers = ", ".join(sorted(game.answer for game in games)[:5])
+    return {
+        "prefix": " -> ".join(prefix),
+        "games": len(games),
+        "fives": fives,
+        "sixes": sixes,
+        "risk": risk,
+        "sample_answers": sample_answers,
+    }
 
 
 def format_worst_pattern_row(pattern, games):
@@ -1928,14 +2356,29 @@ def format_worst_pattern_row(pattern, games):
     }
 
 
-def format_worst_game_row(game):
+def format_worst_game_row(game, possible_answers=None):
     feedbacks = tuple(score_guess(guess, game.answer) for guess in game.guesses)
+    path = " -> ".join(game.guesses)
+    if possible_answers is not None:
+        path = format_candidate_trace_path(game, possible_answers)
     return {
         "answer": game.answer,
         "guess_count": game.guess_count,
-        "path": " -> ".join(game.guesses),
+        "path": path,
         "feedback": " -> ".join(feedbacks),
     }
+
+
+def format_candidate_trace_path(game, possible_answers):
+    candidates = tuple(possible_answers)
+    parts = []
+    for guess in game.guesses:
+        parts.append(f"{guess}({len(candidates)})")
+        feedback = score_guess(guess, game.answer)
+        if is_solved(feedback):
+            break
+        candidates = filter_candidates_by_feedback(candidates, guess, feedback)
+    return " -> ".join(parts)
 
 
 def print_worst_games(rows):
@@ -1965,6 +2408,20 @@ def print_worst_patterns(rows):
         )
 
 
+def print_worst_prefixes(rows):
+    print("Worst prefixes:")
+    print("prefix  games  5s  6s  risk  sample_answers")
+    for row in rows:
+        print(
+            f"{row['prefix']:<30} "
+            f"{row['games']:<6} "
+            f"{row['fives']:<3} "
+            f"{row['sixes']:<3} "
+            f"{row['risk']:<5} "
+            f"{row['sample_answers']}"
+        )
+
+
 def print_weighting_changes(changes, enabled=True, limit=25):
     if not enabled:
         print("Weighting changed decisions: 0")
@@ -1985,6 +2442,30 @@ def print_weighting_changes(changes, enabled=True, limit=25):
             f"{change['guess_number']:<7} "
             f"{change['unweighted_choice']:<11} "
             f"{change['weighted_choice']:<8} "
+            f"{format_remaining_candidates(change['remaining_candidates'])}"
+        )
+
+
+def print_small_order_changes(changes, enabled=True, limit=25):
+    if not enabled:
+        print("Small-order changed decisions: 0")
+        print("Games affected: 0")
+        return
+
+    affected_games = {change["answer"] for change in changes if change["answer"]}
+    print(f"Small-order changed decisions: {len(changes)}")
+    print(f"Games affected: {len(affected_games)}")
+    if not changes:
+        return
+
+    print("Small-order change examples:")
+    print("answer  guess#  normal  ordered  remaining_candidates")
+    for change in changes[:limit]:
+        print(
+            f"{change['answer']:<7} "
+            f"{change['guess_number']:<7} "
+            f"{change['normal_choice']:<7} "
+            f"{change['ordered_choice']:<8} "
             f"{format_remaining_candidates(change['remaining_candidates'])}"
         )
 

@@ -104,6 +104,7 @@ python -m src.wordle_lab --strategy baseline --first slate
 python -m src.wordle_lab --strategy second-map --first slate --second-guess-pool answers
 python -m src.wordle_lab --strategy second-map-trap --first slate --second-guess-pool answers --show-worst 25
 python -m src.wordle_lab --strategy second-map-bucket --first slate --second-guess-pool answers --show-worst 25
+python -m src.wordle_lab --strategy second-map-expected --first slate --second-guess-pool answers --endgame-threshold 25
 python -m src.wordle_lab --strategy second-map-hybrid --first slate --second-guess-pool answers --trap-threshold 3
 python -m src.wordle_lab --strategy second-map --first slate --second-guess-pool answers --show-worst 25
 python -m src.wordle_lab --strategy second-map-bucket --first slate --second-guess-pool answers --worst-patterns 20
@@ -124,6 +125,8 @@ python -m src.wordle_lab --compare-strategies --csv results/strategy_leaderboard
 `second-map-trap` starts the same way, then uses a probe guess when the remaining candidates look like a trap family, such as answers that share four fixed positions.
 
 `second-map-bucket` starts the same way, then chooses later guesses by minimizing the largest feedback bucket among the remaining candidates. This catches broader trap families that do not share exactly four fixed positions.
+
+`second-map-expected` starts like `second-map-bucket`, then uses the bucket strategy above `--endgame-threshold` and a memoized expected-value search at or below that candidate count. The default threshold is 25.
 
 `second-map-hybrid` uses the normal candidate guess unless it would leave a feedback bucket larger than `--trap-threshold`; then it switches to the bucket probe. The default threshold is 2.
 

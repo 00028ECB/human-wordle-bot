@@ -23,6 +23,7 @@ from src.wordle_lab.__main__ import (
     build_strategy_comparison_rows,
     build_worst_game_rows,
     build_worst_pattern_rows,
+    build_worst_prefix_rows,
     build_strategy_row,
     build_top_opener_rows,
     build_second_feedback_branch_summary,
@@ -37,10 +38,13 @@ from src.wordle_lab.__main__ import (
     choose_bucket_probe,
     choose_answer_candidate,
     choose_hybrid_guess,
+    choose_small_candidate_by_likelihood,
     choose_trap_probe,
     differing_letters,
+    ExpectedValueOptimizer,
     feedback_bucket_sizes,
     find_path_guess_override,
+    format_candidate_trace_path,
     format_comparison_row,
     filter_candidates_for_path,
     format_tune_path_label,
@@ -48,6 +52,8 @@ from src.wordle_lab.__main__ import (
     is_trap_family,
     main,
     play_second_map_game,
+    print_small_order_changes,
+    print_worst_prefixes,
     tuned_overrides_enabled,
     worst_csv_path,
     write_worst_games_csv,
@@ -175,6 +181,30 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.strategy, "second-map-bucket")
 
+    def test_parser_accepts_expected_strategy(self):
+        args = build_parser().parse_args(
+            [
+                "--strategy",
+                "second-map-expected",
+                "--first",
+                "slate",
+                "--endgame-threshold",
+                "50",
+                "--max-expected-guesses",
+                "7",
+                "--max-expected-states",
+                "1234",
+                "--expected-depth",
+                "3",
+            ]
+        )
+
+        self.assertEqual(args.strategy, "second-map-expected")
+        self.assertEqual(args.endgame_threshold, 50)
+        self.assertEqual(args.max_expected_guesses, 7)
+        self.assertEqual(args.max_expected_states, 1234)
+        self.assertEqual(args.expected_depth, 3)
+
     def test_parser_accepts_hybrid_strategy(self):
         args = build_parser().parse_args(
             ["--strategy", "second-map-hybrid", "--first", "slate"]
@@ -201,6 +231,25 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.answer_weighting, "off")
 
+    def test_parser_accepts_small_candidate_order(self):
+        args = build_parser().parse_args(
+            ["--strategy", "second-map-bucket", "--small-candidate-order", "likelihood"]
+        )
+
+        self.assertEqual(args.small_candidate_order, "likelihood")
+
+    def test_parser_defaults_small_candidate_order_to_normal(self):
+        args = build_parser().parse_args(["--strategy", "second-map-bucket"])
+
+        self.assertEqual(args.small_candidate_order, "normal")
+
+    def test_parser_accepts_show_small_order_changes(self):
+        args = build_parser().parse_args(
+            ["--strategy", "second-map-bucket", "--show-small-order-changes"]
+        )
+
+        self.assertTrue(args.show_small_order_changes)
+
     def test_parser_accepts_no_overrides(self):
         args = build_parser().parse_args(
             ["--strategy", "second-map-bucket", "--no-overrides"]
@@ -213,12 +262,35 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.trap_threshold, 2)
 
+    def test_parser_defaults_expected_guardrails(self):
+        args = build_parser().parse_args(["--strategy", "second-map-expected"])
+
+        self.assertEqual(args.endgame_threshold, 10)
+        self.assertEqual(args.max_expected_guesses, 10)
+        self.assertEqual(args.max_expected_states, 50000)
+        self.assertEqual(args.expected_depth, 2)
+
     def test_parser_accepts_show_worst(self):
         args = build_parser().parse_args(
             ["--strategy", "second-map", "--first", "slate", "--show-worst", "25"]
         )
 
         self.assertEqual(args.show_worst, 25)
+
+    def test_parser_accepts_show_candidate_trace(self):
+        args = build_parser().parse_args(
+            [
+                "--strategy",
+                "second-map",
+                "--first",
+                "slate",
+                "--show-worst",
+                "25",
+                "--show-candidate-trace",
+            ]
+        )
+
+        self.assertTrue(args.show_candidate_trace)
 
     def test_parser_accepts_worst_patterns_without_limit(self):
         args = build_parser().parse_args(
@@ -233,6 +305,13 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertEqual(args.worst_patterns, 20)
+
+    def test_parser_accepts_worst_prefixes(self):
+        args = build_parser().parse_args(
+            ["--strategy", "second-map-bucket", "--first", "slate", "--worst-prefixes", "20"]
+        )
+
+        self.assertEqual(args.worst_prefixes, 20)
 
     def test_parser_accepts_second_guess_pool(self):
         args = build_parser().parse_args(
@@ -564,6 +643,30 @@ class CliTests(unittest.TestCase):
 
         report = output.getvalue()
         self.assertIn("Weighting changed decisions:", report)
+        self.assertIn("Games affected:", report)
+
+    def test_main_reports_small_order_change_diagnostics(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            main(
+                [
+                    "--answers",
+                    "data/answers.txt",
+                    "--allowed",
+                    "data/allowed_guesses.txt",
+                    "--strategy",
+                    "baseline",
+                    "--first",
+                    "slate",
+                    "--small-candidate-order",
+                    "likelihood",
+                    "--show-small-order-changes",
+                ]
+            )
+
+        report = output.getvalue()
+        self.assertIn("Small-order changed decisions:", report)
         self.assertIn("Games affected:", report)
 
     def test_main_reports_strategy_second_map_hybrid_for_custom_word_lists(self):
@@ -898,6 +1001,36 @@ class CliTests(unittest.TestCase):
         self.assertIn("Worst games:", report)
         self.assertIn("answer  guesses  path", report)
 
+    def test_main_strategy_show_worst_candidate_trace_prints_counts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--strategy",
+                        "baseline",
+                        "--first",
+                        "slate",
+                        "--show-worst",
+                        "2",
+                        "--show-candidate-trace",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("Worst games:", report)
+        self.assertIn("slate(3)", report)
+
     def test_main_strategy_worst_patterns_prints_pattern_table(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -929,6 +1062,41 @@ class CliTests(unittest.TestCase):
         report = output.getvalue()
         self.assertIn("Worst patterns:", report)
         self.assertIn("pattern  games  avg", report)
+
+    def test_main_strategy_worst_prefixes_prints_prefix_table(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            answers_path.write_text(
+                "caper\ncater\ncaver\ncower\nmower\npower\n",
+                encoding="utf-8",
+            )
+            allowed_path.write_text(
+                "slate\ncrane\ncaper\ncater\ncaver\ncower\nmower\npower\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--strategy",
+                        "baseline",
+                        "--first",
+                        "slate",
+                        "--worst-prefixes",
+                        "3",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("Worst prefixes:", report)
+        self.assertIn("prefix  games  5s", report)
 
     def test_main_reports_top_openers_table(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1127,6 +1295,24 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["second_guess_pool"], "answers")
         self.assertEqual(row["tested"], 3)
 
+    def test_strategy_second_map_expected_reports_selected_pool(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        row = build_strategy_row(
+            "second-map-expected",
+            "slate",
+            allowed_words,
+            answer_words,
+            second_guess_pool_name="answers",
+            endgame_threshold=3,
+            use_overrides=False,
+        )
+
+        self.assertEqual(row["strategy"], "second-map-expected")
+        self.assertEqual(row["second_guess_pool"], "answers")
+        self.assertEqual(row["tested"], 3)
+
     def test_strategy_second_map_hybrid_reports_selected_pool(self):
         allowed_words = ("raise", "slate", "crane", "trace")
         answer_words = ("raise", "slate", "crane")
@@ -1157,6 +1343,9 @@ class CliTests(unittest.TestCase):
             "..YY.": "tacit",
             ".YY..": "brawl",
             ".Y...": "colon",
+            "G..Y.": "cough",
+            "..G..": "grove",
+            "Y....": "mimic",
         }
 
         apply_second_guess_overrides(
@@ -1173,6 +1362,9 @@ class CliTests(unittest.TestCase):
                 "pouch",
                 "rally",
                 "dilly",
+                "count",
+                "grind",
+                "missy",
             ),
             second_guess_by_pattern,
         )
@@ -1187,6 +1379,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(second_guess_by_pattern["..YY."], "pouch")
         self.assertEqual(second_guess_by_pattern[".YY.."], "rally")
         self.assertEqual(second_guess_by_pattern[".Y..."], "dilly")
+        self.assertEqual(second_guess_by_pattern["G..Y."], "count")
+        self.assertEqual(second_guess_by_pattern["..G.."], "grind")
+        self.assertEqual(second_guess_by_pattern["Y...."], "missy")
 
     def test_apply_second_guess_overrides_rejects_invalid_pool_word(self):
         second_guess_by_pattern = {"....Y": "heron"}
@@ -1211,6 +1406,9 @@ class CliTests(unittest.TestCase):
             "..YY.": "tacit",
             ".YY..": "brawl",
             ".Y...": "colon",
+            "G..Y.": "cough",
+            "..G..": "grove",
+            "Y....": "mimic",
         }
 
         apply_second_guess_overrides(
@@ -1228,6 +1426,9 @@ class CliTests(unittest.TestCase):
                 "pouch",
                 "rally",
                 "dilly",
+                "count",
+                "grind",
+                "missy",
             ),
             second_guess_by_pattern,
         )
@@ -1242,6 +1443,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(second_guess_by_pattern["..YY."], "tacit")
         self.assertEqual(second_guess_by_pattern[".YY.."], "brawl")
         self.assertEqual(second_guess_by_pattern[".Y..."], "colon")
+        self.assertEqual(second_guess_by_pattern["G..Y."], "cough")
+        self.assertEqual(second_guess_by_pattern["..G.."], "grove")
+        self.assertEqual(second_guess_by_pattern["Y...."], "mimic")
 
     def test_find_path_guess_override_uses_matching_override(self):
         override_guess = find_path_guess_override(
@@ -1255,6 +1459,19 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertEqual(override_guess, "pouch")
+
+    def test_find_path_guess_override_uses_all_gray_frond_override(self):
+        override_guess = find_path_guess_override(
+            "slate",
+            ".....",
+            "frond",
+            ".....",
+            "answers",
+            ("frond", "chump"),
+            ("slate", "frond"),
+        )
+
+        self.assertEqual(override_guess, "chump")
 
     def test_find_path_guess_override_rejects_invalid_pool_word(self):
         with self.assertRaises(ValueError):
@@ -1404,9 +1621,102 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(guess, choose_bucket_probe(candidates, (), probe_pool))
 
+    def test_expected_value_optimizer_prefers_answer_guess_in_tie(self):
+        optimizer = ExpectedValueOptimizer(("caper", "cater"))
+
+        guess = optimizer.choose_guess(("cater", "caper"), previous_guesses=())
+
+        self.assertEqual(guess, "caper")
+
+    def test_expected_value_optimizer_limits_guess_candidates(self):
+        optimizer = ExpectedValueOptimizer(("caper", "cater", "caver"), max_guesses=1)
+
+        guesses = optimizer._candidate_guesses(("caper", "cater", "caver"), ())
+
+        self.assertEqual(len(guesses), 1)
+
+    def test_expected_value_optimizer_falls_back_after_state_limit(self):
+        optimizer = ExpectedValueOptimizer(("caper", "cater", "caver"), max_states=1)
+        optimizer.state_count = 1
+
+        guess = optimizer.choose_guess(("caper", "cater", "caver"), previous_guesses=())
+
+        self.assertIn(guess, ("caper", "cater", "caver"))
+        self.assertEqual(optimizer.fallback_count, 1)
+
+    def test_expected_value_optimizer_depth_limit_uses_estimate(self):
+        optimizer = ExpectedValueOptimizer(("caper", "cater", "caver"), max_depth=1)
+
+        value = optimizer.expected_total(("caper", "cater", "caver"), (), 0)
+
+        self.assertGreaterEqual(value, 1.0)
+
+    def test_choose_next_guess_uses_expected_strategy_under_threshold(self):
+        candidates = ("femur", "fewer")
+        optimizer = ExpectedValueOptimizer(("fewer", "femur"))
+
+        guess = choose_next_guess_with_optional_probe(
+            candidates,
+            previous_guesses=("slate", "rocky", "fever"),
+            allowed_guesses=candidates,
+            probe_pool=("fever", "femur", "fewer"),
+            use_trap_avoidance=False,
+            use_bucket_strategy=True,
+            use_expected_strategy=True,
+            endgame_threshold=2,
+            expected_optimizer=optimizer,
+        )
+
+        self.assertEqual(guess, "femur")
+
+    def test_small_candidate_order_applies_before_bucket_probe(self):
+        candidates = ("femur", "fewer")
+        probe_pool = ("fever", "femur", "fewer")
+        changes = []
+
+        guess = choose_next_guess_with_optional_probe(
+            candidates,
+            previous_guesses=("slate", "rocky", "fever"),
+            allowed_guesses=candidates,
+            probe_pool=probe_pool,
+            use_trap_avoidance=False,
+            use_bucket_strategy=True,
+            small_candidate_order="likelihood",
+            small_order_changes=changes,
+            answer="fewer",
+            guess_number=5,
+        )
+
+        self.assertEqual(guess, "fewer")
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["normal_choice"], "femur")
+        self.assertEqual(changes[0]["ordered_choice"], "fewer")
+
     def test_answer_likelihood_score_prefers_common_word_shape(self):
         self.assertGreater(answer_likelihood_score("crane"), answer_likelihood_score("jazzy"))
         self.assertGreater(answer_likelihood_score("caper"), answer_likelihood_score("qajaq"))
+
+    def test_choose_small_candidate_by_likelihood_uses_pair_override(self):
+        expectations = (
+            (["femur", "fewer"], "fewer"),
+            (["piper", "viper"], "viper"),
+            (["upper", "ember"], "ember"),
+            (["biddy", "giddy"], "giddy"),
+            (["frank", "prank"], "prank"),
+            (["pried", "weird"], "weird"),
+            (["breed", "greed"], "greed"),
+            (["brief", "grief"], "grief"),
+        )
+
+        for candidates, expected in expectations:
+            with self.subTest(candidates=candidates):
+                self.assertEqual(choose_small_candidate_by_likelihood(candidates), expected)
+
+    def test_choose_small_candidate_by_likelihood_preserves_unmapped_order(self):
+        self.assertEqual(
+            choose_small_candidate_by_likelihood(["abode", "adobe", "anode"]),
+            "abode",
+        )
 
     def test_choose_answer_candidate_preserves_default_order_when_off(self):
         candidates = ("jazzy", "crane")
@@ -1440,6 +1750,102 @@ class CliTests(unittest.TestCase):
         self.assertEqual(len(changes), 1)
         self.assertEqual(changes[0]["unweighted_choice"], "jazzy")
         self.assertEqual(changes[0]["weighted_choice"], "crane")
+
+    def test_choose_answer_candidate_uses_small_candidate_order_for_two_or_three(self):
+        candidates = ("femur", "fewer")
+
+        guess = choose_answer_candidate(
+            candidates,
+            (),
+            candidates,
+            "off",
+            guess_number=4,
+            small_candidate_order="likelihood",
+        )
+
+        self.assertEqual(guess, "fewer")
+
+    def test_choose_answer_candidate_small_order_ignores_larger_candidate_sets(self):
+        candidates = ("jazzy", "crane", "caper", "raise")
+
+        guess = choose_answer_candidate(
+            candidates,
+            (),
+            candidates,
+            "off",
+            guess_number=4,
+            small_candidate_order="likelihood",
+        )
+
+        self.assertEqual(guess, "jazzy")
+
+    def test_choose_answer_candidate_small_order_requires_guess_four_or_later(self):
+        candidates = ("femur", "fewer")
+
+        guess = choose_answer_candidate(
+            candidates,
+            (),
+            candidates,
+            "off",
+            guess_number=3,
+            small_candidate_order="likelihood",
+        )
+
+        self.assertEqual(guess, "femur")
+
+    def test_choose_answer_candidate_small_order_preserves_unmapped_triple(self):
+        candidates = ("abode", "adobe", "anode")
+
+        guess = choose_answer_candidate(
+            candidates,
+            (),
+            candidates,
+            "off",
+            guess_number=4,
+            small_candidate_order="likelihood",
+        )
+
+        self.assertEqual(guess, "abode")
+
+    def test_choose_answer_candidate_records_small_order_change(self):
+        candidates = ("femur", "fewer")
+        changes = []
+
+        guess = choose_answer_candidate(
+            candidates,
+            (),
+            candidates,
+            "off",
+            answer="fewer",
+            guess_number=4,
+            small_candidate_order="likelihood",
+            small_order_changes=changes,
+        )
+
+        self.assertEqual(guess, "fewer")
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["normal_choice"], "femur")
+        self.assertEqual(changes[0]["ordered_choice"], "fewer")
+
+    def test_print_small_order_changes_outputs_examples(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_small_order_changes(
+                (
+                    {
+                        "answer": "crane",
+                        "guess_number": 4,
+                        "normal_choice": "jazzy",
+                        "ordered_choice": "crane",
+                        "remaining_candidates": ("jazzy", "crane"),
+                    },
+                )
+            )
+
+        report = output.getvalue()
+        self.assertIn("Small-order changed decisions: 1", report)
+        self.assertIn("jazzy", report)
 
     def test_format_remaining_candidates_truncates_long_lists(self):
         candidates = tuple(f"word{i}" for i in range(14))
@@ -1489,6 +1895,27 @@ class CliTests(unittest.TestCase):
         self.assertIn("slate -> raise -> crane", rows[0]["path"])
         self.assertEqual(rows[1]["answer"], "raise")
 
+    def test_format_candidate_trace_path_counts_candidates_before_each_guess(self):
+        game = GameResult(
+            answer="crane",
+            guesses=("slate", "raise", "crane"),
+            solved=True,
+        )
+
+        path = format_candidate_trace_path(game, ("raise", "crane", "slate"))
+
+        self.assertTrue(path.startswith("slate(3)"))
+        self.assertIn("crane(1)", path)
+
+    def test_build_worst_game_rows_can_include_candidate_trace(self):
+        games = (
+            GameResult(answer="crane", guesses=("slate", "raise", "crane"), solved=True),
+        )
+
+        rows = build_worst_game_rows(games, 1, ("raise", "crane", "slate"))
+
+        self.assertIn("slate(3)", rows[0]["path"])
+
     def test_build_worst_pattern_rows_groups_and_sorts_by_risk_then_average(self):
         games = (
             GameResult(answer="slate", guesses=("slate",), solved=True),
@@ -1522,6 +1949,65 @@ class CliTests(unittest.TestCase):
         rows = build_worst_pattern_rows(games, limit=1)
 
         self.assertEqual(len(rows), 1)
+
+    def test_build_worst_prefix_rows_groups_long_games_by_prefix(self):
+        games = (
+            GameResult(
+                answer="caper",
+                guesses=("slate", "rocky", "fiend", "caper", "caper"),
+                solved=True,
+            ),
+            GameResult(
+                answer="cater",
+                guesses=("slate", "rocky", "fiend", "caper", "cater"),
+                solved=True,
+            ),
+            GameResult(
+                answer="caver",
+                guesses=("slate", "rocky", "fiend", "caper", "cater", "caver"),
+                solved=True,
+            ),
+            GameResult(
+                answer="crane",
+                guesses=("slate", "crane", "crane"),
+                solved=True,
+            ),
+            GameResult(
+                answer="dodge",
+                guesses=("slate", "rocky", "fiend", "caper", "cater", "dodge"),
+                solved=False,
+            ),
+        )
+
+        rows = build_worst_prefix_rows(games, limit=5)
+
+        self.assertEqual(rows[0]["prefix"], "slate -> rocky")
+        self.assertEqual(rows[0]["games"], 3)
+        self.assertEqual(rows[0]["fives"], 2)
+        self.assertEqual(rows[0]["sixes"], 1)
+        self.assertEqual(rows[0]["risk"], 9)
+        self.assertEqual(rows[0]["sample_answers"], "caper, cater, caver")
+
+    def test_print_worst_prefixes_outputs_table(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_worst_prefixes(
+                (
+                    {
+                        "prefix": "slate -> rocky",
+                        "games": 2,
+                        "fives": 1,
+                        "sixes": 1,
+                        "risk": 7,
+                        "sample_answers": "caper, cater",
+                    },
+                )
+            )
+
+        report = output.getvalue()
+        self.assertIn("Worst prefixes:", report)
+        self.assertIn("slate -> rocky", report)
 
     def test_build_tune_pattern_rows_ranks_second_guesses(self):
         allowed_words = ("raise", "slate", "crane", "trace")
@@ -2322,6 +2808,14 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             main(["--strategy", "baseline", "--first", "slate", "--show-worst", "0"])
 
+    def test_show_candidate_trace_requires_strategy(self):
+        with self.assertRaises(SystemExit):
+            main(["--show-candidate-trace", "--show-worst", "1"])
+
+    def test_show_candidate_trace_requires_show_worst(self):
+        with self.assertRaises(SystemExit):
+            main(["--strategy", "baseline", "--first", "slate", "--show-candidate-trace"])
+
     def test_worst_patterns_requires_strategy(self):
         with self.assertRaises(SystemExit):
             main(["--worst-patterns"])
@@ -2330,9 +2824,37 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             main(["--strategy", "baseline", "--first", "slate", "--worst-patterns", "0"])
 
+    def test_worst_prefixes_requires_strategy(self):
+        with self.assertRaises(SystemExit):
+            main(["--worst-prefixes", "5"])
+
+    def test_worst_prefixes_requires_positive_limit(self):
+        with self.assertRaises(SystemExit):
+            main(["--strategy", "baseline", "--first", "slate", "--worst-prefixes", "0"])
+
+    def test_show_small_order_changes_requires_strategy(self):
+        with self.assertRaises(SystemExit):
+            main(["--show-small-order-changes"])
+
     def test_trap_threshold_requires_positive_limit(self):
         with self.assertRaises(SystemExit):
             main(["--strategy", "second-map-hybrid", "--trap-threshold", "0"])
+
+    def test_endgame_threshold_requires_positive_limit(self):
+        with self.assertRaises(SystemExit):
+            main(["--strategy", "second-map-expected", "--endgame-threshold", "0"])
+
+    def test_max_expected_guesses_requires_positive_limit(self):
+        with self.assertRaises(SystemExit):
+            main(["--strategy", "second-map-expected", "--max-expected-guesses", "0"])
+
+    def test_max_expected_states_requires_positive_limit(self):
+        with self.assertRaises(SystemExit):
+            main(["--strategy", "second-map-expected", "--max-expected-states", "0"])
+
+    def test_expected_depth_requires_positive_limit(self):
+        with self.assertRaises(SystemExit):
+            main(["--strategy", "second-map-expected", "--expected-depth", "0"])
 
     def test_top_requires_positive_limit(self):
         with self.assertRaises(SystemExit):
