@@ -62,6 +62,7 @@ from src.wordle_lab.__main__ import (
     print_final_cluster_override_changes,
     print_opener_strategy_report,
     print_small_order_changes,
+    tune_pattern_objective_rank,
     print_worst_prefixes,
     tune_objective_rank,
     tuned_overrides_enabled,
@@ -204,6 +205,19 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertEqual(args.tune_path_objective, "safe-balanced")
+
+    def test_parser_accepts_tune_pattern_objective(self):
+        args = build_parser().parse_args(
+            [
+                "--tune-pattern",
+                "slate",
+                "....Y",
+                "--tune-pattern-objective",
+                "branch-safe",
+            ]
+        )
+
+        self.assertEqual(args.tune_pattern_objective, "branch-safe")
 
     def test_parser_accepts_strategy(self):
         args = build_parser().parse_args(["--strategy", "second-map", "--first", "slate"])
@@ -2426,6 +2440,65 @@ class CliTests(unittest.TestCase):
         self.assertIn("worst_branch_candidates", rows[0])
         self.assertIn("worst_branch_fives", rows[0])
         self.assertIn("worst_branch_risk", rows[0])
+
+    def test_tune_pattern_objective_rank_preserves_risk_default(self):
+        row = {
+            "second_guess": "crane",
+            "average": "3.00",
+            "solved_4_or_less": 7,
+            "fives": 2,
+            "sixes": 0,
+            "risk_score": 4,
+        }
+
+        self.assertEqual(
+            tune_pattern_objective_rank(row),
+            (4, 3.0, -7, "crane"),
+        )
+
+    def test_tune_pattern_objective_rank_supports_branch_safe(self):
+        branchy = {
+            "second_guess": "alpha",
+            "average": "2.50",
+            "solved_4_or_less": 9,
+            "fives": 1,
+            "sixes": 1,
+            "risk_score": 7,
+            "worst_branch_risk": 7,
+            "worst_branch_fives": 1,
+        }
+        safer = {
+            "second_guess": "bravo",
+            "average": "3.50",
+            "solved_4_or_less": 6,
+            "fives": 2,
+            "sixes": 0,
+            "risk_score": 10,
+            "worst_branch_risk": 4,
+            "worst_branch_fives": 1,
+        }
+
+        self.assertLess(
+            tune_pattern_objective_rank(safer, "branch-safe"),
+            tune_pattern_objective_rank(branchy, "branch-safe"),
+        )
+
+    def test_tune_pattern_branch_safe_can_rank_without_printing_branch_columns(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        rows = build_tune_pattern_rows(
+            "slate",
+            "GGGGG",
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            second_guess_pool=answer_words,
+            top=1,
+            objective="branch-safe",
+        )
+
+        self.assertNotIn("worst_branch_pattern", rows[0])
 
     def test_build_second_feedback_branch_summary_reports_worst_branch(self):
         candidates = ("raise", "crane")

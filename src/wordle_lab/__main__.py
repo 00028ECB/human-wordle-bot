@@ -367,6 +367,12 @@ def build_parser():
         help="ranking objective for --tune-branch and --tune-path (default: risk)",
     )
     parser.add_argument(
+        "--tune-pattern-objective",
+        choices=("risk", "branch-safe"),
+        default="risk",
+        help="ranking objective for --tune-pattern (default: risk)",
+    )
+    parser.add_argument(
         "--answer-weighting",
         choices=("off", "simple"),
         default="off",
@@ -539,6 +545,7 @@ def main(argv=None):
                 answer_weighting=args.answer_weighting,
                 small_candidate_order=args.small_candidate_order,
                 branch_summary=args.branch_summary,
+                objective=args.tune_pattern_objective,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -782,6 +789,7 @@ def build_tune_pattern_rows(
     answer_weighting="off",
     small_candidate_order="normal",
     branch_summary=False,
+    objective="risk",
 ):
     rows, _games = build_tune_pattern_result(
         first_guess,
@@ -795,6 +803,7 @@ def build_tune_pattern_rows(
         answer_weighting=answer_weighting,
         small_candidate_order=small_candidate_order,
         branch_summary=branch_summary,
+        objective=objective,
     )
     return rows
 
@@ -812,6 +821,7 @@ def build_tune_pattern_result(
     answer_weighting="off",
     small_candidate_order="normal",
     branch_summary=False,
+    objective="risk",
 ):
     validate_tune_pattern(first_guess, pattern, strategy, allowed_guesses)
     if second_guess is not None and second_guess not in second_guess_pool:
@@ -851,20 +861,48 @@ def build_tune_pattern_result(
                 len(candidates),
                 games,
                 candidates,
-                branch_summary=branch_summary,
+                branch_summary=branch_summary or objective == "branch-safe",
             )
         )
 
     ranked_rows = sorted(
         rows,
-        key=lambda row: (
+        key=lambda row: tune_pattern_objective_rank(row, objective),
+    )
+    returned_rows = tuple(ranked_rows[:top])
+    if objective == "branch-safe" and not branch_summary:
+        returned_rows = tuple(strip_tune_pattern_branch_summary(row) for row in returned_rows)
+    return returned_rows, selected_games
+
+
+def tune_pattern_objective_rank(row, objective="risk"):
+    average = float(row["average"])
+    if objective == "risk":
+        return (
             row["risk_score"],
-            float(row["average"]),
+            average,
             -row["solved_4_or_less"],
             row["second_guess"],
-        ),
-    )
-    return tuple(ranked_rows[:top]), selected_games
+        )
+    if objective == "branch-safe":
+        return (
+            row["sixes"],
+            row["risk_score"],
+            row["worst_branch_risk"],
+            row["worst_branch_fives"],
+            row["fives"],
+            average,
+            row["second_guess"],
+        )
+    raise ValueError(f"Unsupported tune-pattern objective: {objective}")
+
+
+def strip_tune_pattern_branch_summary(row):
+    return {
+        key: value
+        for key, value in row.items()
+        if key not in TUNE_PATTERN_BRANCH_COLUMNS[len(TUNE_PATTERN_COLUMNS):]
+    }
 
 
 def validate_tune_pattern(first_guess, pattern, strategy, allowed_guesses):
