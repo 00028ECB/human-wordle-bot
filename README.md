@@ -50,7 +50,7 @@ Notes: this is the clean mathematical benchmark mode. It does not use prior-answ
 
 ### Human Mode Champion
 
-Purpose: real-world daily-play mode. Uses dated prior-answer history, recency weighting, Human Mode overrides, and streak-safe bucket logic. This is the current weighted daily-play champion.
+Purpose: real-world daily-play mode. Uses dated prior-answer history, the `aggressive` prior-weight preset, Human Mode overrides, and streak-safe bucket logic. This is the current weighted daily-play champion.
 
 Current command:
 
@@ -63,6 +63,7 @@ python -m src.wordle_lab \
   --second-guess-pool answers \
   --prior-answers-dated data/prior_answers_dated.csv \
   --prior-policy downweight \
+  --prior-weight-preset aggressive \
   --as-of-date 2026-05-28 \
   --show-weighted-score \
   --weighted-worst-patterns 25
@@ -74,14 +75,17 @@ Current weighted result, as of `2026-05-28`:
 Strategy: second-map-bucket
 First: slate
 Pool: answers
-Total weight: 1363.00
-Weighted average guesses: 3.43
-Weighted <=3: 737.85
-Weighted <=4: 1345.20
-Weighted 5s: 17.80
+Total weight: 1206.48
+Weighted average guesses: 3.4274
+Weighted <=3: 660.67
+Weighted <=4: 1191.80
+Weighted 5s: 14.68
 Weighted 6s: 0.00
 Weighted failed: 0.00
+Weighted risk: 29.36
 ```
+
+The previous `current` preset result was weighted average `3.4348`, weighted `5s` `17.80`, and weighted risk `35.60`. `aggressive` is now the best tested Human Mode preset. Human Mode's symbolic target is to get weighted average below roughly `3.421`, but this is a weighted real-world-play benchmark, not a claim of beating the pure mathematical optimum.
 
 Ordinary uniform report shown during Human Mode:
 
@@ -119,6 +123,7 @@ Human Mode:
 
 ```bash
 python -m src.wordle_lab --human-recommend slate ....Y
+python -m src.wordle_lab --human-recommend slate ....Y --prior-weight-preset aggressive
 ```
 
 Pure Mode:
@@ -294,6 +299,8 @@ python -m src.wordle_lab --human-recommend slate ....Y drown .Y...
 
 Use `--recommend-top N` to show ranked alternatives. The first row matches the recommended next guess and each row shows whether the guess is an answer or probe, its largest feedback bucket, bucket count, expected remaining candidates, and weighted expected remaining when Human Mode downweighting is active.
 
+Human Mode overrides are selected by downstream weighted simulation, so an override may not always have the best immediate max bucket or immediate expected-remaining score in the alternatives table.
+
 Human Mode recommendations use dated prior-answer weights when provided:
 
 ```bash
@@ -447,7 +454,7 @@ Use `--prior-policy` to choose how prior answers affect solving:
 
 ### Prior Weight Buckets
 
-When `--prior-policy downweight` is used with `--prior-answers-dated`, each tested answer gets a deterministic weight:
+When `--prior-policy downweight` is used with `--prior-answers-dated`, each tested answer gets a deterministic weight. The default `--prior-weight-preset current` schedule is:
 
 ```text
 never used:               1.00
@@ -457,7 +464,34 @@ used 366-730 days ago:   0.35
 used more than 730 days:  0.60
 ```
 
+Other presets let you model different attitudes toward repeats:
+
+```text
+preset           0-90  91-365  366-730  730+  never
+current          0.05  0.15    0.35     0.60  1.00
+conservative     0.10  0.25    0.50     0.75  1.00
+aggressive       0.02  0.10    0.25     0.50  1.00
+repeat-friendly  0.15  0.35    0.60     0.85  1.00
+```
+
 The date basis comes from `--as-of-date YYYY-MM-DD`. If no date is provided, Wordle Lab uses the latest date in the dated prior file, or today when the file is empty.
+
+To compare the Human Mode weighted benchmark under every preset:
+
+```bash
+python -m src.wordle_lab \
+  --compare-prior-weight-presets \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --strategy second-map-bucket \
+  --first slate \
+  --second-guess-pool answers \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --prior-policy downweight \
+  --as-of-date 2026-05-28
+```
+
+The comparison reports total weight, weighted average, weighted `<=3`, weighted `<=4`, weighted `5s`, weighted `6s`, weighted failures, and weighted risk for each preset. Weighted averages print with four decimal places by default; use `--precision N` to choose a different number of decimal places for report averages.
 
 ### Weighted Human-Mode Scoring
 
