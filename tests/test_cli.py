@@ -2,6 +2,7 @@ import io
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import date
 from pathlib import Path
 
 from src.wordle_lab.__main__ import (
@@ -22,6 +23,10 @@ from src.wordle_lab.__main__ import (
     apply_prior_policy_to_test_answers,
     build_comparison_rows,
     build_comparison_row,
+    build_prior_dated_stats,
+    build_prior_answer_weights,
+    build_prior_weight_stats,
+    build_weighted_score_row,
     build_parser,
     build_full_second_map_rows,
     build_second_map_row_for_pattern,
@@ -44,11 +49,14 @@ from src.wordle_lab.__main__ import (
     build_tune_pattern_rows,
     bucket_probe_rank,
     choose_next_guess_with_optional_probe,
+    choose_bucket_probe_with_prior_diagnostics,
     choose_bucket_probe,
     choose_answer_candidate,
     choose_hybrid_guess,
+    choose_prior_weighted_endgame_candidate,
     choose_small_candidate_by_likelihood,
     choose_trap_probe,
+    clean_prior_source,
     candidates_before_guess,
     differing_letters,
     ExpectedValueOptimizer,
@@ -61,19 +69,31 @@ from src.wordle_lab.__main__ import (
     format_tune_path_label,
     format_remaining_candidates,
     is_trap_family,
+    load_dated_prior_answers,
     load_built_second_map,
     open_incremental_built_second_map_csv,
     main,
     play_baseline_game,
     play_second_map_game,
     print_built_second_map,
+    print_clean_prior_source_report,
     print_final_clusters,
     print_final_cluster_override_changes,
     print_opener_strategy_report,
     print_prior_stats_report,
+    print_prior_dated_stats_report,
+    print_prior_weight_stats_report,
+    print_prior_weighting_changes,
+    print_weighted_score_report,
+    print_small_candidate_events,
     print_small_order_changes,
+    record_small_candidate_event,
     tune_pattern_objective_rank,
     print_worst_prefixes,
+    prior_answer_weight_for_age,
+    prior_safe_answer_rank,
+    prior_weight_for_word,
+    resolve_as_of_date,
     read_completed_built_second_map_patterns,
     run_build_second_map,
     second_guess_candidate_rank,
@@ -145,6 +165,11 @@ class CliTests(unittest.TestCase):
 
         self.assertTrue(args.prior_stats)
 
+    def test_parser_accepts_prior_dated_stats_mode(self):
+        args = build_parser().parse_args(["--prior-dated-stats"])
+
+        self.assertTrue(args.prior_dated_stats)
+
     def test_parser_accepts_prior_answer_options(self):
         args = build_parser().parse_args(
             [
@@ -152,11 +177,52 @@ class CliTests(unittest.TestCase):
                 "data/prior_answers.txt",
                 "--prior-policy",
                 "exclude",
+                "--prior-answers-dated",
+                "data/prior_answers_dated.csv",
             ]
         )
 
         self.assertEqual(args.prior_answers, "data/prior_answers.txt")
         self.assertEqual(args.prior_policy, "exclude")
+        self.assertEqual(args.prior_answers_dated, "data/prior_answers_dated.csv")
+
+    def test_parser_accepts_prior_weighting_options(self):
+        args = build_parser().parse_args(
+            [
+                "--strategy",
+                "baseline",
+                "--prior-policy",
+                "downweight",
+                "--as-of-date",
+                "2025-09-01",
+                "--show-prior-weighting-changes",
+                "--prior-weight-stats",
+            ]
+        )
+
+        self.assertEqual(args.prior_policy, "downweight")
+        self.assertEqual(args.as_of_date, "2025-09-01")
+        self.assertTrue(args.show_prior_weighting_changes)
+        self.assertTrue(args.prior_weight_stats)
+
+    def test_parser_accepts_show_weighted_score(self):
+        args = build_parser().parse_args(["--strategy", "baseline", "--show-weighted-score"])
+
+        self.assertTrue(args.show_weighted_score)
+
+    def test_parser_accepts_show_small_candidate_events(self):
+        args = build_parser().parse_args(
+            ["--strategy", "baseline", "--show-small-candidate-events", "50"]
+        )
+
+        self.assertEqual(args.show_small_candidate_events, 50)
+
+    def test_parser_accepts_clean_prior_source(self):
+        args = build_parser().parse_args(
+            ["--clean-prior-source", "raw.txt", "data/prior_answers.txt"]
+        )
+
+        self.assertEqual(args.clean_prior_source, ["raw.txt", "data/prior_answers.txt"])
 
     def test_parser_accepts_second_guess_map(self):
         args = build_parser().parse_args(["--second-guess-map", "slate"])
@@ -646,6 +712,349 @@ class CliTests(unittest.TestCase):
         self.assertIn("Prior answers found in answer list: 1", report)
         self.assertIn("Remaining non-prior answers: 2", report)
 
+    def test_load_dated_prior_answers_validates_csv_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "prior_dated.csv"
+            path.write_text(
+                "date,word\n2025-08-31,petal\n2021-06-19,cigar\n",
+                encoding="utf-8",
+            )
+
+            rows = load_dated_prior_answers(path)
+
+        self.assertEqual(rows[0][0].isoformat(), "2025-08-31")
+        self.assertEqual(rows[0][1], "petal")
+        self.assertEqual(rows[1][1], "cigar")
+
+    def test_load_dated_prior_answers_rejects_invalid_word(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "prior_dated.csv"
+            path.write_text("date,word\n2025-08-31,PETAL\n", encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                load_dated_prior_answers(path)
+
+    def test_load_dated_prior_answers_rejects_invalid_date(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "prior_dated.csv"
+            path.write_text("date,word\nnot-date,petal\n", encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                load_dated_prior_answers(path)
+
+    def test_build_prior_dated_stats_counts_repeats_and_dates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "prior_dated.csv"
+            path.write_text(
+                "date,word\n"
+                "2025-08-31,petal\n"
+                "2021-06-19,cigar\n"
+                "2022-01-01,cigar\n",
+                encoding="utf-8",
+            )
+            rows = load_dated_prior_answers(path)
+
+        stats = build_prior_dated_stats(rows)
+
+        self.assertEqual(stats["dated_prior_rows"], 3)
+        self.assertEqual(stats["valid_dated_prior_words"], 3)
+        self.assertEqual(stats["unique_prior_words"], 2)
+        self.assertEqual(stats["duplicates_repeats"], 1)
+        self.assertEqual(stats["oldest_date"], "2021-06-19")
+        self.assertEqual(stats["newest_date"], "2025-08-31")
+        self.assertEqual(stats["words_repeated_more_than_once"], (("cigar", 2),))
+
+    def test_resolve_as_of_date_uses_latest_dated_prior_by_default(self):
+        dated_rows = ((date(2025, 8, 31), "petal"), (date(2021, 6, 19), "cigar"))
+
+        as_of = resolve_as_of_date(None, dated_rows)
+
+        self.assertEqual(as_of, date(2025, 8, 31))
+
+    def test_resolve_as_of_date_accepts_explicit_date(self):
+        as_of = resolve_as_of_date("2025-09-01", ())
+
+        self.assertEqual(as_of, date(2025, 9, 1))
+
+    def test_prior_answer_weight_for_age_uses_schedule(self):
+        self.assertEqual(prior_answer_weight_for_age(90), 0.05)
+        self.assertEqual(prior_answer_weight_for_age(365), 0.15)
+        self.assertEqual(prior_answer_weight_for_age(730), 0.35)
+        self.assertEqual(prior_answer_weight_for_age(731), 0.60)
+
+    def test_build_prior_answer_weights_uses_most_recent_date(self):
+        dated_rows = (
+            (date(2024, 1, 1), "cigar"),
+            (date(2025, 8, 1), "cigar"),
+            (date(2023, 1, 1), "petal"),
+        )
+
+        weights = build_prior_answer_weights(
+            dated_rows,
+            date(2025, 9, 1),
+            fallback_prior_answers=("raise",),
+        )
+
+        self.assertEqual(weights["cigar"], 0.05)
+        self.assertEqual(weights["petal"], 0.60)
+        self.assertEqual(weights["raise"], 0.60)
+        self.assertEqual(prior_weight_for_word("slate", weights), 1.0)
+
+    def test_build_prior_weight_stats_counts_answer_buckets(self):
+        weights = {"cigar": 0.05, "petal": 0.60}
+
+        rows = build_prior_weight_stats(("cigar", "petal", "slate"), weights)
+        counts = {row["weight"]: row["count"] for row in rows}
+
+        self.assertEqual(counts["1.00"], 1)
+        self.assertEqual(counts["0.05"], 1)
+        self.assertEqual(counts["0.60"], 1)
+
+    def test_print_prior_weight_stats_report_outputs_table(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_prior_weight_stats_report(
+                ("cigar", "petal", "slate"),
+                {"cigar": 0.05, "petal": 0.60},
+            )
+
+        report = output.getvalue()
+        self.assertIn("Prior weight stats:", report)
+        self.assertIn("0.05", report)
+        self.assertIn("used within last 90 days", report)
+
+    def test_build_weighted_score_row_uses_prior_weights(self):
+        games = (
+            GameResult(answer="cigar", guesses=("slate", "cigar"), solved=True),
+            GameResult(answer="petal", guesses=("slate", "crane", "petal"), solved=True),
+            GameResult(answer="raise", guesses=("slate", "crane", "raise"), solved=False),
+        )
+
+        row = build_weighted_score_row(
+            games,
+            {"cigar": 0.05, "petal": 0.60},
+        )
+
+        self.assertAlmostEqual(row["total_weight"], 1.65)
+        self.assertAlmostEqual(row["weighted_average"], (0.05 * 2 + 0.60 * 3 + 1.0 * 3) / 1.65)
+        self.assertAlmostEqual(row["weighted_solved_3_or_less"], 0.65)
+        self.assertAlmostEqual(row["weighted_solved_4_or_less"], 0.65)
+        self.assertAlmostEqual(row["weighted_failed"], 1.0)
+
+    def test_print_weighted_score_report_outputs_summary(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_weighted_score_report(
+                {
+                    "total_weight": 1.65,
+                    "weighted_average": 2.97,
+                    "weighted_solved_3_or_less": 0.65,
+                    "weighted_solved_4_or_less": 0.65,
+                    "weighted_fives": 0.0,
+                    "weighted_sixes": 0.0,
+                    "weighted_failed": 1.0,
+                }
+            )
+
+        report = output.getvalue()
+        self.assertIn("Weighted human-mode score:", report)
+        self.assertIn("Total weight: 1.65", report)
+        self.assertIn("Weighted average guesses: 2.97", report)
+
+    def test_print_prior_dated_stats_report_outputs_counts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "prior_dated.csv"
+            path.write_text(
+                "date,word\n2025-08-31,petal\n2021-06-19,cigar\n2022-01-01,cigar\n",
+                encoding="utf-8",
+            )
+            rows = load_dated_prior_answers(path)
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                print_prior_dated_stats_report(rows)
+
+        report = output.getvalue()
+        self.assertIn("dated prior rows: 3", report)
+        self.assertIn("valid dated prior words: 3", report)
+        self.assertIn("unique prior words: 2", report)
+        self.assertIn("duplicates/repeats: 1", report)
+        self.assertIn("oldest date: 2021-06-19", report)
+        self.assertIn("newest date: 2025-08-31", report)
+        self.assertIn("words repeated more than once: cigar (2)", report)
+
+    def test_main_reports_prior_dated_stats(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prior_dated_path = Path(temp_dir) / "prior_dated.csv"
+            prior_dated_path.write_text(
+                "date,word\n2025-08-31,petal\n2021-06-19,cigar\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--prior-answers-dated",
+                        str(prior_dated_path),
+                        "--prior-dated-stats",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("dated prior rows: 2", report)
+        self.assertIn("words repeated more than once: none", report)
+
+    def test_main_reports_prior_weight_stats(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_dated_path = temp_path / "prior_dated.csv"
+            answers_path.write_text("cigar\npetal\nslate\n", encoding="utf-8")
+            allowed_path.write_text("cigar\npetal\nslate\n", encoding="utf-8")
+            prior_dated_path.write_text(
+                "date,word\n2025-08-31,petal\n2025-06-01,cigar\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--prior-answers-dated",
+                        str(prior_dated_path),
+                        "--as-of-date",
+                        "2025-09-01",
+                        "--prior-weight-stats",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("Prior weight stats:", report)
+        self.assertIn("0.05", report)
+        self.assertIn("0.15", report)
+
+    def test_main_strategy_reports_small_candidate_events(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_dated_path = temp_path / "prior_dated.csv"
+            answers_path.write_text("raise\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("zzzzz\nraise\ncrane\n", encoding="utf-8")
+            prior_dated_path.write_text("date,word\n2025-08-31,raise\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--prior-answers-dated",
+                        str(prior_dated_path),
+                        "--as-of-date",
+                        "2025-09-01",
+                        "--prior-policy",
+                        "downweight",
+                        "--strategy",
+                        "baseline",
+                        "--first",
+                        "zzzzz",
+                        "--show-small-candidate-events",
+                        "5",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("Small candidate events:", report)
+        self.assertIn("raise:0.05", report)
+
+    def test_main_strategy_reports_small_candidate_events_with_prior_ignore(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_path = temp_path / "prior.txt"
+            prior_dated_path = temp_path / "prior_dated.csv"
+            answers_path.write_text("raise\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("zzzzz\nraise\ncrane\n", encoding="utf-8")
+            prior_path.write_text("", encoding="utf-8")
+            prior_dated_path.write_text("date,word\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--prior-answers",
+                        str(prior_path),
+                        "--prior-answers-dated",
+                        str(prior_dated_path),
+                        "--strategy",
+                        "baseline",
+                        "--first",
+                        "zzzzz",
+                        "--show-small-candidate-events",
+                        "5",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("Small candidate events:", report)
+        self.assertIn("raise, crane", report)
+        self.assertIn("raise:1.00", report)
+
+    def test_main_prior_weighting_changes_reports_actual_bucket_decisions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_dated_path = temp_path / "prior_dated.csv"
+            answers_path.write_text("raise\nslate\n", encoding="utf-8")
+            allowed_path.write_text("couch\nraise\nslate\n", encoding="utf-8")
+            prior_dated_path.write_text("date,word\n2025-08-01,raise\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--strategy",
+                        "baseline",
+                        "--first",
+                        "couch",
+                        "--prior-answers-dated",
+                        str(prior_dated_path),
+                        "--prior-policy",
+                        "downweight",
+                        "--as-of-date",
+                        "2025-09-01",
+                        "--show-prior-weighting-changes",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("Prior-weighting changed decisions:", report)
+        self.assertNotIn("Prior-weighting changed decisions: 0", report)
+        self.assertIn("normal", report)
+        self.assertIn("weighted", report)
+        self.assertIn("raise:0.05", report)
+
     def test_main_rejects_invalid_prior_answer_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -671,6 +1080,75 @@ class CliTests(unittest.TestCase):
                 )
 
         self.assertIn("Invalid word", error_output.getvalue())
+
+    def test_clean_prior_source_writes_answer_words_in_first_seen_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "raw.txt"
+            output_path = temp_path / "prior.txt"
+            source_path.write_text(
+                "crane CRANE slate crane xyzzz raise raise sixletters\n",
+                encoding="utf-8",
+            )
+
+            stats = clean_prior_source(
+                source_path,
+                output_path,
+                possible_answers=("raise", "slate", "crane"),
+            )
+            cleaned_text = output_path.read_text(encoding="utf-8")
+
+        self.assertEqual(cleaned_text, "crane\nslate\nraise\n")
+        self.assertEqual(stats["source_words_found"], 6)
+        self.assertEqual(stats["valid_wordle_answers_written"], 3)
+        self.assertEqual(stats["duplicates_skipped"], 2)
+        self.assertEqual(stats["non_answer_words_skipped"], 1)
+
+    def test_print_clean_prior_source_report_outputs_counts(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_clean_prior_source_report(
+                {
+                    "source_words_found": 4,
+                    "valid_wordle_answers_written": 2,
+                    "duplicates_skipped": 1,
+                    "non_answer_words_skipped": 1,
+                }
+            )
+
+        report = output.getvalue()
+        self.assertIn("source words found: 4", report)
+        self.assertIn("valid Wordle answers written: 2", report)
+        self.assertIn("duplicates skipped: 1", report)
+        self.assertIn("non-answer words skipped: 1", report)
+
+    def test_main_clean_prior_source_uses_configured_answers_without_allowed_match(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            source_path = temp_path / "raw.txt"
+            output_path = temp_path / "data" / "prior_answers.txt"
+            answers_path.write_text("crane\nslate\n", encoding="utf-8")
+            source_path.write_text("crane slate raise\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--clean-prior-source",
+                        str(source_path),
+                        str(output_path),
+                    ]
+                )
+
+            cleaned_text = output_path.read_text(encoding="utf-8")
+
+        self.assertEqual(cleaned_text, "crane\nslate\n")
+        self.assertIn("source words found: 3", output.getvalue())
+        self.assertIn("valid Wordle answers written: 2", output.getvalue())
 
     def test_main_reports_second_guess_map_for_custom_word_lists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2181,7 +2659,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(tested_answers, ("slate", "crane"))
 
-    def test_choose_answer_candidate_downweights_prior_answers(self):
+    def test_choose_answer_candidate_downweight_requires_dated_weights(self):
         candidates = ("raise", "slate", "crane")
 
         guess = choose_answer_candidate(
@@ -2193,7 +2671,173 @@ class CliTests(unittest.TestCase):
             prior_policy="downweight",
         )
 
+        self.assertEqual(guess, "raise")
+
+    def test_choose_answer_candidate_downweights_by_dated_prior_weight(self):
+        candidates = ("raise", "slate", "crane")
+        changes = []
+
+        guess = choose_answer_candidate(
+            candidates,
+            (),
+            candidates,
+            "off",
+            answer="crane",
+            guess_number=3,
+            prior_policy="downweight",
+            prior_answer_weights={"raise": 0.05, "slate": 0.15},
+            prior_weighting_changes=changes,
+        )
+
         self.assertEqual(guess, "crane")
+        self.assertEqual(changes[0]["normal_guess"], "raise")
+        self.assertEqual(changes[0]["weighted_guess"], "crane")
+        self.assertEqual(changes[0]["normal_weight"], 0.05)
+        self.assertEqual(changes[0]["weighted_weight"], 1.0)
+
+    def test_choose_answer_candidate_prior_weighting_only_small_clusters(self):
+        candidates = ("raise", "slate", "crane", "trace", "irate", "stare")
+
+        guess = choose_answer_candidate(
+            candidates,
+            (),
+            candidates,
+            "off",
+            prior_policy="downweight",
+            prior_answer_weights={"raise": 0.05},
+        )
+
+        self.assertEqual(guess, "raise")
+
+    def test_choose_prior_weighted_endgame_candidate_keeps_bucket_safety_primary(self):
+        candidates = ("raise", "slate", "crane")
+
+        choice = choose_prior_weighted_endgame_candidate(
+            "raise",
+            candidates,
+            candidates,
+            {"raise": 0.05},
+        )
+
+        self.assertEqual(prior_safe_answer_rank(choice, candidates), prior_safe_answer_rank("raise", candidates))
+
+    def test_bucket_probe_rank_uses_prior_weight_as_tie_breaker(self):
+        candidates = ("raise", "slate")
+
+        raise_rank = bucket_probe_rank("raise", candidates, prior_answer_weights={"raise": 0.05})
+        slate_rank = bucket_probe_rank("slate", candidates, prior_answer_weights={"raise": 0.05})
+
+        self.assertLess(slate_rank, raise_rank)
+
+    def test_bucket_probe_records_prior_weighting_change(self):
+        changes = []
+
+        guess = choose_bucket_probe_with_prior_diagnostics(
+            ("raise", "slate"),
+            previous_guesses=(),
+            probe_pool=("raise", "slate"),
+            prior_policy="downweight",
+            prior_answer_weights={"raise": 0.05},
+            prior_weighting_changes=changes,
+            answer="slate",
+            guess_number=4,
+        )
+
+        self.assertEqual(guess, "slate")
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["normal_guess"], "raise")
+        self.assertEqual(changes[0]["weighted_guess"], "slate")
+        self.assertEqual(changes[0]["prior_weights"], (("raise", 0.05), ("slate", 1.0)))
+
+    def test_print_prior_weighting_changes_outputs_examples(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_prior_weighting_changes(
+                (
+                    {
+                        "answer": "crane",
+                        "guess_number": 3,
+                        "normal_guess": "raise",
+                        "weighted_guess": "crane",
+                        "remaining_candidates": ("raise", "crane"),
+                        "normal_weight": 0.05,
+                        "weighted_weight": 1.0,
+                        "normal_max_bucket": 1,
+                        "weighted_max_bucket": 1,
+                        "prior_weights": (("raise", 0.05), ("crane", 1.0)),
+                    },
+                )
+            )
+
+        report = output.getvalue()
+        self.assertIn("Prior-weighting changed decisions: 1", report)
+        self.assertIn("normal_w", report)
+        self.assertIn("weighted_w", report)
+        self.assertIn("Prior-weighting max-bucket increases: 0", report)
+        self.assertIn("raise", report)
+        self.assertIn("crane", report)
+        self.assertIn("raise:0.05", report)
+
+    def test_record_small_candidate_event_records_weights_and_candidate_flag(self):
+        events = []
+
+        record_small_candidate_event(
+            events,
+            "crane",
+            4,
+            "crane",
+            ("raise", "crane"),
+            {"raise": 0.05},
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["answer"], "crane")
+        self.assertEqual(events[0]["guess_number"], 4)
+        self.assertEqual(events[0]["normal_guess"], "crane")
+        self.assertTrue(events[0]["chosen_is_candidate"])
+        self.assertEqual(events[0]["prior_weights"], (("raise", 0.05), ("crane", 1.0)))
+
+    def test_choose_answer_candidate_records_small_candidate_event(self):
+        events = []
+
+        guess = choose_answer_candidate(
+            ("raise", "crane"),
+            (),
+            ("raise", "crane"),
+            "off",
+            answer="crane",
+            guess_number=4,
+            prior_answer_weights={"raise": 0.05},
+            small_candidate_events=events,
+        )
+
+        self.assertEqual(guess, "raise")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["remaining_candidates"], ("raise", "crane"))
+
+    def test_print_small_candidate_events_outputs_rows(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_small_candidate_events(
+                (
+                    {
+                        "answer": "crane",
+                        "guess_number": 4,
+                        "normal_guess": "raise",
+                        "remaining_candidates": ("raise", "crane"),
+                        "prior_weights": (("raise", 0.05), ("crane", 1.0)),
+                        "chosen_is_candidate": True,
+                    },
+                ),
+                limit=1,
+            )
+
+        report = output.getvalue()
+        self.assertIn("Small candidate events:", report)
+        self.assertIn("raise:0.05", report)
+        self.assertIn("crane:1.00", report)
 
     def test_play_baseline_game_excludes_prior_candidates(self):
         words = ("raise", "slate", "crane")
@@ -2224,6 +2868,24 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["tested"], 2)
         self.assertEqual(row["failed"], 0)
         self.assertEqual({game.answer for game in games}, {"slate", "crane"})
+
+    def test_prior_exclude_keeps_prior_answers_available_as_answer_pool_guesses(self):
+        words = ("slate", "frond", "cough", "pouch")
+
+        row, games = build_strategy_result(
+            "second-map-bucket",
+            "slate",
+            words,
+            words,
+            second_guess_pool_name="answers",
+            prior_answers=("frond", "slate"),
+            prior_policy="exclude",
+        )
+
+        self.assertEqual(row["tested"], 2)
+        self.assertEqual(row["failed"], 0)
+        self.assertEqual({game.answer for game in games}, {"cough", "pouch"})
+        self.assertTrue(all(game.guesses[1] == "frond" for game in games))
 
     def test_choose_answer_candidate_uses_small_candidate_order_for_two_or_three(self):
         candidates = ("femur", "fewer")
@@ -4090,6 +4752,18 @@ class CliTests(unittest.TestCase):
     def test_show_final_cluster_override_changes_requires_strategy(self):
         with self.assertRaises(SystemExit):
             main(["--show-final-cluster-override-changes"])
+
+    def test_show_prior_weighting_changes_requires_strategy(self):
+        with self.assertRaises(SystemExit):
+            main(["--show-prior-weighting-changes"])
+
+    def test_show_small_candidate_events_requires_strategy(self):
+        with self.assertRaises(SystemExit):
+            main(["--show-small-candidate-events", "5"])
+
+    def test_show_small_candidate_events_requires_positive_limit(self):
+        with self.assertRaises(SystemExit):
+            main(["--strategy", "baseline", "--show-small-candidate-events", "0"])
 
     def test_trap_threshold_requires_positive_limit(self):
         with self.assertRaises(SystemExit):

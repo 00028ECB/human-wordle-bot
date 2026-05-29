@@ -2,8 +2,10 @@
 
 import argparse
 import csv
+import re
 import time
 from collections import Counter, defaultdict
+from datetime import date
 from functools import cache
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from .simulator import (
     DEFAULT_ALLOWED_GUESSES_PATH,
     DEFAULT_ANSWERS_PATH,
     DEFAULT_FIRST_GUESS,
+    DEFAULT_PRIOR_ANSWERS_DATED_PATH,
     DEFAULT_PRIOR_ANSWERS_PATH,
     GameResult,
     load_words,
@@ -232,6 +235,17 @@ def build_parser():
         "--prior-stats",
         action="store_true",
         help="show prior-answer statistics",
+    )
+    mode.add_argument(
+        "--prior-dated-stats",
+        action="store_true",
+        help="show dated prior-answer statistics",
+    )
+    mode.add_argument(
+        "--clean-prior-source",
+        nargs=2,
+        metavar=("INPUT", "OUTPUT"),
+        help="clean a pasted historical answer source into a prior-answer word list",
     )
     mode.add_argument(
         "--second-guess-map",
@@ -507,10 +521,41 @@ def build_parser():
         help=f"prior answer word list (default: {DEFAULT_PRIOR_ANSWERS_PATH})",
     )
     parser.add_argument(
+        "--prior-answers-dated",
+        default=str(DEFAULT_PRIOR_ANSWERS_DATED_PATH),
+        help=f"dated prior answer CSV (default: {DEFAULT_PRIOR_ANSWERS_DATED_PATH})",
+    )
+    parser.add_argument(
         "--prior-policy",
         choices=("ignore", "exclude", "downweight"),
         default="ignore",
         help="how to treat prior answers while solving (default: ignore)",
+    )
+    parser.add_argument(
+        "--as-of-date",
+        metavar="YYYY-MM-DD",
+        help="date to use for dated prior-answer weighting",
+    )
+    parser.add_argument(
+        "--show-prior-weighting-changes",
+        action="store_true",
+        help="show where dated prior weighting changes answer choices",
+    )
+    parser.add_argument(
+        "--show-small-candidate-events",
+        type=int,
+        metavar="N",
+        help="show the first N times a strategy reaches 2-5 remaining candidates",
+    )
+    parser.add_argument(
+        "--prior-weight-stats",
+        action="store_true",
+        help="show answer counts by dated prior-answer weight bucket",
+    )
+    parser.add_argument(
+        "--show-weighted-score",
+        action="store_true",
+        help="show weighted human-mode score for strategy runs",
     )
     return parser
 
@@ -557,6 +602,14 @@ def main(argv=None):
         raise SystemExit("--show-small-order-changes can only be used with --strategy")
     if args.show_final_cluster_override_changes and not args.strategy:
         raise SystemExit("--show-final-cluster-override-changes can only be used with --strategy")
+    if args.show_prior_weighting_changes and not args.strategy:
+        raise SystemExit("--show-prior-weighting-changes can only be used with --strategy")
+    if args.show_small_candidate_events is not None and not args.strategy:
+        raise SystemExit("--show-small-candidate-events can only be used with --strategy")
+    if args.show_small_candidate_events is not None and args.show_small_candidate_events < 1:
+        raise SystemExit("--show-small-candidate-events must be at least 1")
+    if args.show_weighted_score and not args.strategy:
+        raise SystemExit("--show-weighted-score can only be used with --strategy")
     if args.trap_threshold < 1:
         raise SystemExit("--trap-threshold must be at least 1")
     if args.endgame_threshold < 1:
@@ -578,14 +631,49 @@ def main(argv=None):
     if args.max_second_guesses is not None and args.max_second_guesses < 1:
         raise SystemExit("--max-second-guesses must be at least 1")
 
+    if args.clean_prior_source:
+        try:
+            possible_answers = load_words(args.answers)
+            stats = clean_prior_source(
+                args.clean_prior_source[0],
+                args.clean_prior_source[1],
+                possible_answers,
+            )
+        except (FileNotFoundError, ValueError) as error:
+            parser.error(str(error))
+        print_clean_prior_source_report(stats)
+        return
+
+    if args.prior_dated_stats:
+        try:
+            dated_prior_answers = load_dated_prior_answers(args.prior_answers_dated)
+        except (FileNotFoundError, ValueError) as error:
+            parser.error(str(error))
+        print_prior_dated_stats_report(dated_prior_answers)
+        return
+
     try:
         allowed_guesses, possible_answers = load_word_lists(
             allowed_path=args.allowed,
             answers_path=args.answers,
         )
         prior_answers = load_words(args.prior_answers)
+        dated_prior_answers = load_dated_prior_answers(args.prior_answers_dated)
     except (FileNotFoundError, ValueError) as error:
         parser.error(str(error))
+
+    try:
+        as_of_date = resolve_as_of_date(args.as_of_date, dated_prior_answers)
+    except ValueError as error:
+        parser.error(str(error))
+    prior_answer_weights = build_prior_answer_weights(
+        dated_prior_answers,
+        as_of_date,
+    )
+
+    if args.prior_weight_stats:
+        print_prior_weight_stats_report(possible_answers, prior_answer_weights)
+        return
 
     if args.compare_openers_with_strategy:
         try:
@@ -606,6 +694,7 @@ def main(argv=None):
                 final_cluster_overrides=args.final_cluster_overrides,
                 prior_answers=prior_answers,
                 prior_policy=args.prior_policy,
+                prior_answer_weights=prior_answer_weights,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -623,6 +712,7 @@ def main(argv=None):
             small_candidate_order=args.small_candidate_order,
             prior_answers=prior_answers,
             prior_policy=args.prior_policy,
+            prior_answer_weights=prior_answer_weights,
         )
         print_strategy_report(rows)
         if args.csv:
@@ -748,6 +838,8 @@ def main(argv=None):
         weighting_changes = []
         small_order_changes = []
         final_cluster_override_changes = []
+        prior_weighting_changes = []
+        small_candidate_events = []
         start_time = time.perf_counter()
         try:
             row, games = build_strategy_result(
@@ -777,6 +869,17 @@ def main(argv=None):
                 built_second_map_path=args.use_built_second_map,
                 prior_answers=prior_answers,
                 prior_policy=args.prior_policy,
+                prior_answer_weights=prior_answer_weights,
+                prior_weighting_changes=(
+                    prior_weighting_changes
+                    if args.show_prior_weighting_changes
+                    else None
+                ),
+                small_candidate_events=(
+                    small_candidate_events
+                    if args.show_small_candidate_events
+                    else None
+                ),
             )
         except ValueError as error:
             parser.error(str(error))
@@ -784,6 +887,11 @@ def main(argv=None):
         print_strategy_report((row,))
         if args.strategy == "second-map-expected":
             print_expected_diagnostics(row, elapsed_seconds)
+        if args.show_weighted_score:
+            print_weighted_score_report(
+                build_weighted_score_row(games, prior_answer_weights),
+                enabled=args.prior_policy == "downweight",
+            )
         if args.show_weighting_changes:
             print_weighting_changes(weighting_changes, enabled=args.answer_weighting == "simple")
         if args.show_small_order_changes:
@@ -795,6 +903,16 @@ def main(argv=None):
             print_final_cluster_override_changes(
                 final_cluster_override_changes,
                 enabled=args.final_cluster_overrides == "on",
+            )
+        if args.show_prior_weighting_changes:
+            print_prior_weighting_changes(
+                prior_weighting_changes,
+                enabled=args.prior_policy == "downweight",
+            )
+        if args.show_small_candidate_events:
+            print_small_candidate_events(
+                small_candidate_events,
+                limit=args.show_small_candidate_events,
             )
         worst_rows = ()
         if args.worst_patterns is not None:
@@ -893,6 +1011,7 @@ def main(argv=None):
                 args.first.lower(),
                 prior_answers=prior_answers,
                 prior_policy=args.prior_policy,
+                prior_answer_weights=prior_answer_weights,
             )
             for answer in tested_answers
         )
@@ -941,6 +1060,196 @@ def print_prior_stats_report(possible_answers, prior_answers):
     print(f"Remaining non-prior answers: {len(remaining_non_prior_answers)}")
 
 
+def load_dated_prior_answers(path):
+    csv_path = Path(path)
+    try:
+        csv_file = csv_path.open(newline="", encoding="utf-8")
+    except FileNotFoundError as error:
+        raise FileNotFoundError(f"Dated prior answer file not found: {csv_path}") from error
+
+    rows = []
+    with csv_file:
+        reader = csv.DictReader(csv_file)
+        if reader.fieldnames is None:
+            raise ValueError("Dated prior answer CSV must include date and word columns.")
+        required_columns = {"date", "word"}
+        if not required_columns.issubset(reader.fieldnames):
+            raise ValueError("Dated prior answer CSV must include date and word columns.")
+        for row_number, row in enumerate(reader, start=2):
+            date_text = (row.get("date") or "").strip()
+            word = (row.get("word") or "").strip()
+            try:
+                parsed_date = date.fromisoformat(date_text)
+            except ValueError as error:
+                raise ValueError(f"Invalid date on row {row_number}: {date_text!r}") from error
+            if len(word) != 5 or not word.isalpha() or word != word.lower():
+                raise ValueError(f"Invalid word on row {row_number}: {word!r}")
+            rows.append((parsed_date, word))
+    return tuple(rows)
+
+
+def build_prior_dated_stats(dated_prior_answers):
+    word_counts = Counter(word for _answer_date, word in dated_prior_answers)
+    repeated_words = tuple(
+        (word, count)
+        for word, count in sorted(word_counts.items())
+        if count > 1
+    )
+    dates = [answer_date for answer_date, _word in dated_prior_answers]
+    return {
+        "dated_prior_rows": len(dated_prior_answers),
+        "valid_dated_prior_words": len(dated_prior_answers),
+        "unique_prior_words": len(word_counts),
+        "duplicates_repeats": len(dated_prior_answers) - len(word_counts),
+        "oldest_date": min(dates).isoformat() if dates else "-",
+        "newest_date": max(dates).isoformat() if dates else "-",
+        "words_repeated_more_than_once": repeated_words,
+    }
+
+
+def resolve_as_of_date(as_of_date_text, dated_prior_answers):
+    if as_of_date_text:
+        try:
+            return date.fromisoformat(as_of_date_text)
+        except ValueError as error:
+            raise ValueError(f"Invalid --as-of-date: {as_of_date_text!r}") from error
+    if dated_prior_answers:
+        return max(answer_date for answer_date, _word in dated_prior_answers)
+    return date.today()
+
+
+def prior_answer_weight_for_age(days_since_use):
+    if days_since_use <= 90:
+        return 0.05
+    if days_since_use <= 365:
+        return 0.15
+    if days_since_use <= 730:
+        return 0.35
+    return 0.60
+
+
+def build_prior_answer_weights(dated_prior_answers, as_of_date, fallback_prior_answers=()):
+    latest_dates_by_word = {}
+    for answer_date, word in dated_prior_answers:
+        if word not in latest_dates_by_word or answer_date > latest_dates_by_word[word]:
+            latest_dates_by_word[word] = answer_date
+
+    weights = {word: 0.60 for word in fallback_prior_answers}
+    for word, answer_date in latest_dates_by_word.items():
+        days_since_use = max(0, (as_of_date - answer_date).days)
+        weights[word] = prior_answer_weight_for_age(days_since_use)
+    return weights
+
+
+def prior_weight_for_word(word, prior_answer_weights):
+    return prior_answer_weights.get(word, 1.0)
+
+
+def prior_weight_bucket_label(weight):
+    if weight == 1.0:
+        return "never used"
+    if weight == 0.05:
+        return "used within last 90 days"
+    if weight == 0.15:
+        return "used 91-365 days ago"
+    if weight == 0.35:
+        return "used 366-730 days ago"
+    if weight == 0.60:
+        return "used more than 730 days ago"
+    return "other"
+
+
+def build_prior_weight_stats(possible_answers, prior_answer_weights):
+    buckets = Counter()
+    for answer in possible_answers:
+        weight = prior_weight_for_word(answer, prior_answer_weights)
+        buckets[(weight, prior_weight_bucket_label(weight))] += 1
+    return tuple(
+        {
+            "weight": f"{weight:.2f}",
+            "bucket": label,
+            "count": buckets[(weight, label)],
+        }
+        for weight, label in (
+            (1.0, "never used"),
+            (0.05, "used within last 90 days"),
+            (0.15, "used 91-365 days ago"),
+            (0.35, "used 366-730 days ago"),
+            (0.60, "used more than 730 days ago"),
+        )
+    )
+
+
+def print_prior_weight_stats_report(possible_answers, prior_answer_weights):
+    print("Prior weight stats:")
+    print("weight  bucket                    count")
+    for row in build_prior_weight_stats(possible_answers, prior_answer_weights):
+        print(f"{row['weight']:<7} {row['bucket']:<25} {row['count']}")
+
+
+def print_prior_dated_stats_report(dated_prior_answers):
+    stats = build_prior_dated_stats(dated_prior_answers)
+    repeated_words = stats["words_repeated_more_than_once"]
+    repeated_text = (
+        ", ".join(f"{word} ({count})" for word, count in repeated_words)
+        if repeated_words
+        else "none"
+    )
+    print(f"dated prior rows: {stats['dated_prior_rows']}")
+    print(f"valid dated prior words: {stats['valid_dated_prior_words']}")
+    print(f"unique prior words: {stats['unique_prior_words']}")
+    print(f"duplicates/repeats: {stats['duplicates_repeats']}")
+    print(f"oldest date: {stats['oldest_date']}")
+    print(f"newest date: {stats['newest_date']}")
+    print(f"words repeated more than once: {repeated_text}")
+
+
+def clean_prior_source(input_path, output_path, possible_answers):
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+    try:
+        source_text = input_path.read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        raise FileNotFoundError(f"Prior source file not found: {input_path}") from error
+
+    answer_words = set(possible_answers)
+    source_words = re.findall(r"\b[a-z]{5}\b", source_text)
+    seen_words = set()
+    cleaned_words = []
+    duplicates_skipped = 0
+    non_answer_words_skipped = 0
+
+    for word in source_words:
+        if word in seen_words:
+            duplicates_skipped += 1
+            continue
+        seen_words.add(word)
+        if word not in answer_words:
+            non_answer_words_skipped += 1
+            continue
+        cleaned_words.append(word)
+
+    if output_path.parent != Path("."):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        "".join(f"{word}\n" for word in cleaned_words),
+        encoding="utf-8",
+    )
+    return {
+        "source_words_found": len(source_words),
+        "valid_wordle_answers_written": len(cleaned_words),
+        "duplicates_skipped": duplicates_skipped,
+        "non_answer_words_skipped": non_answer_words_skipped,
+    }
+
+
+def print_clean_prior_source_report(stats):
+    print(f"source words found: {stats['source_words_found']}")
+    print(f"valid Wordle answers written: {stats['valid_wordle_answers_written']}")
+    print(f"duplicates skipped: {stats['duplicates_skipped']}")
+    print(f"non-answer words skipped: {stats['non_answer_words_skipped']}")
+
+
 def print_timing_report(elapsed_seconds, opener_count):
     average_seconds = elapsed_seconds / opener_count if opener_count else 0
     print(f"Elapsed seconds: {elapsed_seconds:.2f}")
@@ -951,6 +1260,20 @@ def print_expected_diagnostics(row, elapsed_seconds):
     print(f"Expected-value states: {row.get('expected_states', 0)}")
     print(f"Expected-value fallbacks: {row.get('expected_fallbacks', 0)}")
     print(f"Elapsed seconds: {elapsed_seconds:.2f}")
+
+
+def print_weighted_score_report(row, enabled=True):
+    if not enabled:
+        print("Weighted human-mode score: disabled")
+        return
+    print("Weighted human-mode score:")
+    print(f"Total weight: {row['total_weight']:.2f}")
+    print(f"Weighted average guesses: {row['weighted_average']:.2f}")
+    print(f"Weighted <=3: {row['weighted_solved_3_or_less']:.2f}")
+    print(f"Weighted <=4: {row['weighted_solved_4_or_less']:.2f}")
+    print(f"Weighted 5s: {row['weighted_fives']:.2f}")
+    print(f"Weighted 6s: {row['weighted_sixes']:.2f}")
+    print(f"Weighted failed: {row['weighted_failed']:.2f}")
 
 
 def build_tune_pattern_rows(
@@ -2229,6 +2552,7 @@ def build_strategy_comparison_rows(
     final_cluster_overrides="off",
     prior_answers=(),
     prior_policy="ignore",
+    prior_answer_weights=None,
 ):
     strategy_specs = (
         ("baseline", "", 2),
@@ -2260,6 +2584,7 @@ def build_strategy_comparison_rows(
             final_cluster_overrides=final_cluster_overrides,
             prior_answers=prior_answers,
             prior_policy=prior_policy,
+            prior_answer_weights=prior_answer_weights,
         )
         if strategy == "baseline":
             row = {**row, "second_guess_pool": "-"}
@@ -2284,6 +2609,7 @@ def build_opener_strategy_comparison_rows(
     final_cluster_overrides="off",
     prior_answers=(),
     prior_policy="ignore",
+    prior_answer_weights=None,
 ):
     rows = []
     for first_guess in first_guesses:
@@ -2308,6 +2634,7 @@ def build_opener_strategy_comparison_rows(
             final_cluster_overrides=final_cluster_overrides,
             prior_answers=prior_answers,
             prior_policy=prior_policy,
+            prior_answer_weights=prior_answer_weights,
         )
         rows.append(format_opener_strategy_row(row))
     return tuple(rows)
@@ -2347,6 +2674,7 @@ def build_strategy_row(
     final_cluster_overrides="off",
     prior_answers=(),
     prior_policy="ignore",
+    prior_answer_weights=None,
 ):
     row, _games = build_strategy_result(
         strategy,
@@ -2365,6 +2693,7 @@ def build_strategy_row(
         final_cluster_overrides=final_cluster_overrides,
         prior_answers=prior_answers,
         prior_policy=prior_policy,
+        prior_answer_weights=prior_answer_weights,
     )
     return row
 
@@ -2390,6 +2719,9 @@ def build_strategy_result(
     built_second_map_path=None,
     prior_answers=(),
     prior_policy="ignore",
+    prior_answer_weights=None,
+    prior_weighting_changes=None,
+    small_candidate_events=None,
 ):
     if first_guess not in allowed_guesses:
         raise ValueError(f"First guess {first_guess!r} is not in the allowed guess list.")
@@ -2405,6 +2737,7 @@ def build_strategy_result(
             and small_candidate_order == "normal"
             and final_cluster_overrides == "off"
             and prior_policy == "ignore"
+            and small_candidate_events is None
         ):
             result = run_simulation(
                 allowed_guesses=allowed_guesses,
@@ -2428,6 +2761,9 @@ def build_strategy_result(
                     final_cluster_override_changes,
                     prior_answers,
                     prior_policy,
+                    prior_answer_weights,
+                    prior_weighting_changes,
+                    small_candidate_events,
                 )
                 for answer in tested_answers
             )
@@ -2451,7 +2787,7 @@ def build_strategy_result(
             and tuned_overrides_enabled(strategy, use_overrides)
         )
         second_guess_pool = (
-            allowed_guesses if second_guess_pool_name == "allowed" else tested_answers
+            allowed_guesses if second_guess_pool_name == "allowed" else possible_answers
         )
         if built_second_map_path:
             second_guess_by_pattern = load_built_second_map(
@@ -2514,6 +2850,9 @@ def build_strategy_result(
                 second_guess_pool_name=second_guess_pool_name,
                 prior_answers=prior_answers,
                 prior_policy=prior_policy,
+                prior_answer_weights=prior_answer_weights,
+                prior_weighting_changes=prior_weighting_changes,
+                small_candidate_events=small_candidate_events,
             )
             for answer in tested_answers
         )
@@ -2560,6 +2899,9 @@ def play_second_map_game(
     second_guess_pool_name="allowed",
     prior_answers=(),
     prior_policy="ignore",
+    prior_answer_weights=None,
+    prior_weighting_changes=None,
+    small_candidate_events=None,
 ):
     guesses = []
     candidates = apply_prior_policy_to_candidates(
@@ -2578,6 +2920,14 @@ def play_second_map_game(
     candidates = filter_candidates_by_feedback(candidates, first_guess, first_feedback)
     candidates = apply_prior_policy_to_candidates(candidates, prior_answers, prior_policy)
     second_guess = second_guess_by_pattern[first_feedback]
+    record_small_candidate_event(
+        small_candidate_events,
+        answer,
+        len(guesses) + 1,
+        second_guess,
+        candidates,
+        prior_answer_weights,
+    )
     second_feedback = score_guess(second_guess, answer)
     guesses.append(second_guess)
     if is_solved(second_feedback):
@@ -2597,6 +2947,7 @@ def play_second_map_game(
             guesses,
         )
     while candidates:
+        pre_guess_candidates = candidates
         if path_override is not None:
             next_guess = path_override
             path_override = None
@@ -2623,7 +2974,18 @@ def play_second_map_game(
                 final_cluster_override_changes,
                 prior_answers,
                 prior_policy,
+                prior_answer_weights,
+                prior_weighting_changes,
+                None,
             )
+        record_small_candidate_event(
+            small_candidate_events,
+            answer,
+            len(guesses) + 1,
+            next_guess,
+            pre_guess_candidates,
+            prior_answer_weights,
+        )
         feedback = score_guess(next_guess, answer)
         guesses.append(next_guess)
         if is_solved(feedback):
@@ -2647,6 +3009,9 @@ def play_baseline_game(
     final_cluster_override_changes=None,
     prior_answers=(),
     prior_policy="ignore",
+    prior_answer_weights=None,
+    prior_weighting_changes=None,
+    small_candidate_events=None,
 ):
     guesses = []
     candidates = apply_prior_policy_to_candidates(
@@ -2657,6 +3022,7 @@ def play_baseline_game(
 
     while candidates:
         if guesses:
+            pre_guess_candidates = candidates
             next_guess = choose_answer_candidate(
                 candidates,
                 guesses,
@@ -2671,9 +3037,22 @@ def play_baseline_game(
                 final_cluster_override_changes,
                 prior_answers,
                 prior_policy,
+                prior_answer_weights,
+                prior_weighting_changes,
+                None,
             )
         else:
+            pre_guess_candidates = candidates
             next_guess = first_guess
+
+        record_small_candidate_event(
+            small_candidate_events,
+            answer,
+            len(guesses) + 1,
+            next_guess,
+            pre_guess_candidates,
+            prior_answer_weights,
+        )
 
         feedback = score_guess(next_guess, answer)
         guesses.append(next_guess)
@@ -2730,6 +3109,9 @@ def choose_answer_candidate(
     final_cluster_override_changes=None,
     prior_answers=(),
     prior_policy="ignore",
+    prior_answer_weights=None,
+    prior_weighting_changes=None,
+    small_candidate_events=None,
 ):
     allowed = set(allowed_guesses)
     previous = set(previous_guesses)
@@ -2749,20 +3131,13 @@ def choose_answer_candidate(
     if prior_policy not in {"ignore", "exclude", "downweight"}:
         raise ValueError(f"Unsupported prior policy: {prior_policy}")
 
-    choice_candidates = available_candidates
-    if prior_policy == "downweight":
-        prior_answer_set = set(prior_answers)
-        non_prior_candidates = [
-            candidate for candidate in available_candidates if candidate not in prior_answer_set
-        ]
-        if non_prior_candidates:
-            choice_candidates = non_prior_candidates
-
-    unweighted_choice = choice_candidates[0]
+    prior_answer_weights = dict(prior_answer_weights or {})
+    normal_choice_candidates = available_candidates
+    unweighted_choice = normal_choice_candidates[0]
     base_choice = unweighted_choice
     if answer_weighting == "simple":
         base_choice = max(
-            choice_candidates,
+            normal_choice_candidates,
             key=lambda candidate: (answer_likelihood_score(candidate), -candidates.index(candidate)),
         )
         if weighting_changes is not None and base_choice != unweighted_choice:
@@ -2775,6 +3150,24 @@ def choose_answer_candidate(
                     "remaining_candidates": tuple(candidates),
                 }
             )
+    if prior_policy == "downweight" and prior_answer_weights and len(candidates) in (2, 3, 4, 5):
+        weighted_base_choice = choose_prior_weighted_endgame_candidate(
+            base_choice,
+            available_candidates,
+            candidates,
+            prior_answer_weights,
+        )
+        if prior_weighting_changes is not None and weighted_base_choice != base_choice:
+            record_prior_weighting_change(
+                prior_weighting_changes,
+                answer,
+                guess_number,
+                base_choice,
+                weighted_base_choice,
+                candidates,
+                prior_answer_weights,
+            )
+        base_choice = weighted_base_choice
     if final_cluster_overrides == "on":
         override_guess = find_final_cluster_override(candidates, previous_guesses)
         if override_guess is not None and override_guess in available_candidates:
@@ -2794,7 +3187,7 @@ def choose_answer_candidate(
         and len(candidates) in (2, 3)
         and (guess_number or 0) >= 4
     ):
-        ordered_choice = choose_small_candidate_by_likelihood(choice_candidates)
+        ordered_choice = choose_small_candidate_by_likelihood(available_candidates)
         if small_order_changes is not None and ordered_choice != base_choice:
             small_order_changes.append(
                 {
@@ -2805,8 +3198,113 @@ def choose_answer_candidate(
                     "remaining_candidates": tuple(candidates),
                 }
             )
+        record_small_candidate_event(
+            small_candidate_events,
+            answer,
+            guess_number,
+            ordered_choice,
+            candidates,
+            prior_answer_weights,
+        )
         return ordered_choice
+    record_small_candidate_event(
+        small_candidate_events,
+        answer,
+        guess_number,
+        base_choice,
+        candidates,
+        prior_answer_weights,
+    )
     return base_choice
+
+
+def record_small_candidate_event(
+    events,
+    answer,
+    guess_number,
+    chosen_guess,
+    candidates,
+    prior_answer_weights=None,
+):
+    if events is None or len(candidates) not in (2, 3, 4, 5):
+        return
+    prior_answer_weights = prior_answer_weights or {}
+    events.append(
+        {
+            "answer": answer or "",
+            "guess_number": guess_number or 0,
+            "normal_guess": chosen_guess,
+            "remaining_candidates": tuple(candidates),
+            "prior_weights": tuple(
+                (candidate, prior_weight_for_word(candidate, prior_answer_weights))
+                for candidate in candidates
+            ),
+            "chosen_is_candidate": chosen_guess in set(candidates),
+        }
+    )
+
+
+def record_prior_weighting_change(
+    changes,
+    answer,
+    guess_number,
+    normal_guess,
+    weighted_guess,
+    candidates,
+    prior_answer_weights,
+):
+    if changes is None or normal_guess == weighted_guess:
+        return
+    prior_answer_weights = prior_answer_weights or {}
+    changes.append(
+        {
+            "answer": answer or "",
+            "guess_number": guess_number or 0,
+            "normal_guess": normal_guess,
+            "weighted_guess": weighted_guess,
+            "remaining_candidates": tuple(candidates),
+            "prior_weights": tuple(
+                (candidate, prior_weight_for_word(candidate, prior_answer_weights))
+                for candidate in candidates
+            ),
+            "normal_weight": prior_weight_for_word(normal_guess, prior_answer_weights),
+            "weighted_weight": prior_weight_for_word(weighted_guess, prior_answer_weights),
+            "normal_max_bucket": max(feedback_bucket_sizes(normal_guess, candidates)),
+            "weighted_max_bucket": max(feedback_bucket_sizes(weighted_guess, candidates)),
+        }
+    )
+
+
+def choose_prior_weighted_endgame_candidate(
+    normal_choice,
+    available_candidates,
+    candidates,
+    prior_answer_weights,
+):
+    if normal_choice not in candidates:
+        return normal_choice
+    normal_rank = prior_safe_answer_rank(normal_choice, candidates)
+    eligible_candidates = [
+        candidate
+        for candidate in available_candidates
+        if candidate in candidates and prior_safe_answer_rank(candidate, candidates) == normal_rank
+    ]
+    if not eligible_candidates:
+        return normal_choice
+    return max(
+        eligible_candidates,
+        key=lambda candidate: (
+            prior_weight_for_word(candidate, prior_answer_weights),
+            -available_candidates.index(candidate),
+        ),
+    )
+
+
+def prior_safe_answer_rank(guess, candidates):
+    bucket_sizes = feedback_bucket_sizes(guess, candidates)
+    max_bucket_size = max(bucket_sizes)
+    expected_remaining = sum(size * size for size in bucket_sizes) / len(candidates)
+    return (max_bucket_size, expected_remaining)
 
 
 def answer_likelihood_score(word):
@@ -3025,6 +3523,9 @@ def choose_next_guess_with_optional_probe(
     final_cluster_override_changes=None,
     prior_answers=(),
     prior_policy="ignore",
+    prior_answer_weights=None,
+    prior_weighting_changes=None,
+    small_candidate_events=None,
 ):
     if final_cluster_overrides == "on":
         override_guess = find_final_cluster_override(candidates, previous_guesses)
@@ -3043,6 +3544,8 @@ def choose_next_guess_with_optional_probe(
                 None,
                 prior_answers,
                 prior_policy,
+                prior_answer_weights,
+                prior_weighting_changes,
             )
             if (
                 final_cluster_override_changes is not None
@@ -3082,6 +3585,8 @@ def choose_next_guess_with_optional_probe(
             None,
             prior_answers,
             prior_policy,
+            prior_answer_weights,
+            prior_weighting_changes,
         )
     if use_hybrid_strategy:
         return choose_hybrid_guess(
@@ -3098,9 +3603,20 @@ def choose_next_guess_with_optional_probe(
             guess_number,
             prior_answers,
             prior_policy,
+            prior_answer_weights,
+            prior_weighting_changes,
         )
     if use_bucket_strategy:
-        probe = choose_bucket_probe(candidates, previous_guesses, probe_pool)
+        probe = choose_bucket_probe_with_prior_diagnostics(
+            candidates,
+            previous_guesses,
+            probe_pool,
+            prior_policy,
+            prior_answer_weights,
+            prior_weighting_changes,
+            answer,
+            guess_number,
+        )
         if probe is not None:
             return probe
         return choose_answer_candidate(
@@ -3117,6 +3633,8 @@ def choose_next_guess_with_optional_probe(
             None,
             prior_answers,
             prior_policy,
+            prior_answer_weights,
+            prior_weighting_changes,
         )
     if use_trap_avoidance and is_trap_family(candidates):
         probe = choose_trap_probe(candidates, previous_guesses, probe_pool)
@@ -3134,9 +3652,11 @@ def choose_next_guess_with_optional_probe(
         small_order_changes,
         "off",
         None,
-        prior_answers,
-        prior_policy,
-    )
+            prior_answers,
+            prior_policy,
+            prior_answer_weights,
+            prior_weighting_changes,
+        )
 
 
 def choose_hybrid_guess(
@@ -3153,6 +3673,8 @@ def choose_hybrid_guess(
     guess_number=None,
     prior_answers=(),
     prior_policy="ignore",
+    prior_answer_weights=None,
+    prior_weighting_changes=None,
 ):
     normal_guess = choose_answer_candidate(
         candidates,
@@ -3168,14 +3690,61 @@ def choose_hybrid_guess(
         None,
         prior_answers,
         prior_policy,
+        prior_answer_weights,
+        prior_weighting_changes,
     )
     normal_max_bucket = max(feedback_bucket_sizes(normal_guess, candidates))
     if normal_max_bucket > trap_threshold:
-        return choose_bucket_probe(candidates, previous_guesses, probe_pool)
+        return choose_bucket_probe_with_prior_diagnostics(
+            candidates,
+            previous_guesses,
+            probe_pool,
+            prior_policy,
+            prior_answer_weights,
+            prior_weighting_changes,
+            answer,
+            guess_number,
+        )
     return normal_guess
 
 
-def choose_bucket_probe(candidates, previous_guesses, probe_pool):
+def choose_bucket_probe_with_prior_diagnostics(
+    candidates,
+    previous_guesses,
+    probe_pool,
+    prior_policy="ignore",
+    prior_answer_weights=None,
+    prior_weighting_changes=None,
+    answer=None,
+    guess_number=None,
+):
+    if prior_policy == "downweight" and prior_answer_weights:
+        normal_probe = choose_bucket_probe(
+            candidates,
+            previous_guesses,
+            probe_pool,
+            prior_answer_weights=None,
+        )
+        weighted_probe = choose_bucket_probe(
+            candidates,
+            previous_guesses,
+            probe_pool,
+            prior_answer_weights=prior_answer_weights,
+        )
+        record_prior_weighting_change(
+            prior_weighting_changes,
+            answer,
+            guess_number,
+            normal_probe,
+            weighted_probe,
+            candidates,
+            prior_answer_weights,
+        )
+        return weighted_probe
+    return choose_bucket_probe(candidates, previous_guesses, probe_pool)
+
+
+def choose_bucket_probe(candidates, previous_guesses, probe_pool, prior_answer_weights=None):
     previous = set(previous_guesses)
     candidates = tuple(candidates)
     best_guess = None
@@ -3184,7 +3753,7 @@ def choose_bucket_probe(candidates, previous_guesses, probe_pool):
     for guess in probe_pool:
         if guess in previous:
             continue
-        rank = bucket_probe_rank(guess, candidates)
+        rank = bucket_probe_rank(guess, candidates, prior_answer_weights=prior_answer_weights)
         if best_rank is None or rank < best_rank:
             best_guess = guess
             best_rank = rank
@@ -3192,12 +3761,15 @@ def choose_bucket_probe(candidates, previous_guesses, probe_pool):
     return best_guess
 
 
-def bucket_probe_rank(guess, candidates):
+def bucket_probe_rank(guess, candidates, prior_answer_weights=None):
     bucket_sizes = feedback_bucket_sizes(guess, candidates)
     max_bucket_size = max(bucket_sizes)
     expected_remaining = sum(size * size for size in bucket_sizes) / len(candidates)
     is_not_candidate = guess not in set(candidates)
-    return (max_bucket_size, expected_remaining, is_not_candidate, guess)
+    if prior_answer_weights is None:
+        return (max_bucket_size, expected_remaining, is_not_candidate, guess)
+    candidate_weight = prior_weight_for_word(guess, prior_answer_weights) if guess in set(candidates) else 0
+    return (max_bucket_size, expected_remaining, is_not_candidate, -candidate_weight, guess)
 
 
 def feedback_bucket_sizes(guess, candidates):
@@ -3263,6 +3835,42 @@ def build_summary_row_from_games(first_guess, games):
         distribution=distribution,
         failed=tested - solved,
     )
+
+
+def build_weighted_score_row(games, prior_answer_weights):
+    total_weight = 0.0
+    weighted_guess_sum = 0.0
+    weighted_solved_3_or_less = 0.0
+    weighted_solved_4_or_less = 0.0
+    weighted_fives = 0.0
+    weighted_sixes = 0.0
+    weighted_failed = 0.0
+
+    for game in games:
+        weight = prior_weight_for_word(game.answer, prior_answer_weights)
+        total_weight += weight
+        weighted_guess_sum += weight * game.guess_count
+        if game.solved and game.guess_count <= 3:
+            weighted_solved_3_or_less += weight
+        if game.solved and game.guess_count <= 4:
+            weighted_solved_4_or_less += weight
+        if game.solved and game.guess_count == 5:
+            weighted_fives += weight
+        if game.solved and game.guess_count == 6:
+            weighted_sixes += weight
+        if not game.solved:
+            weighted_failed += weight
+
+    weighted_average = weighted_guess_sum / total_weight if total_weight else 0
+    return {
+        "total_weight": total_weight,
+        "weighted_average": weighted_average,
+        "weighted_solved_3_or_less": weighted_solved_3_or_less,
+        "weighted_solved_4_or_less": weighted_solved_4_or_less,
+        "weighted_fives": weighted_fives,
+        "weighted_sixes": weighted_sixes,
+        "weighted_failed": weighted_failed,
+    }
 
 
 def build_worst_game_rows(games, limit, possible_answers=None):
@@ -3528,6 +4136,60 @@ def print_small_order_changes(changes, enabled=True, limit=25):
             f"{change['normal_choice']:<7} "
             f"{change['ordered_choice']:<8} "
             f"{format_remaining_candidates(change['remaining_candidates'])}"
+        )
+
+
+def print_prior_weighting_changes(changes, enabled=True, limit=25):
+    if not enabled:
+        print("Prior-weighting changed decisions: 0")
+        print("Games affected: 0")
+        return
+
+    affected_games = {change["answer"] for change in changes if change["answer"]}
+    print(f"Prior-weighting changed decisions: {len(changes)}")
+    print(f"Games affected: {len(affected_games)}")
+    if not changes:
+        return
+
+    print("Prior-weighting change examples:")
+    print("answer  guess#  normal  weighted  normal_w  weighted_w  remaining_candidates  prior_weights")
+    for change in changes[:limit]:
+        prior_weights = ", ".join(
+            f"{word}:{weight:.2f}"
+            for word, weight in change.get("prior_weights", ())
+        )
+        print(
+            f"{change['answer']:<7} "
+            f"{change['guess_number']:<7} "
+            f"{change['normal_guess']:<7} "
+            f"{change['weighted_guess']:<8} "
+            f"{change['normal_weight']:<9.2f} "
+            f"{change['weighted_weight']:<10.2f} "
+            f"{format_remaining_candidates(change['remaining_candidates']):<22} "
+            f"{prior_weights}"
+        )
+    increased = sum(
+        1
+        for change in changes
+        if change.get("weighted_max_bucket", 0) > change.get("normal_max_bucket", 0)
+    )
+    print(f"Prior-weighting max-bucket increases: {increased}")
+
+
+def print_small_candidate_events(events, limit):
+    print("Small candidate events:")
+    print("answer  guess#  normal  is_candidate  remaining_candidates  prior_weights")
+    for event in events[:limit]:
+        weights = ", ".join(
+            f"{word}:{weight:.2f}" for word, weight in event["prior_weights"]
+        )
+        print(
+            f"{event['answer']:<7} "
+            f"{event['guess_number']:<7} "
+            f"{event['normal_guess']:<7} "
+            f"{str(event['chosen_is_candidate']):<12} "
+            f"{format_remaining_candidates(event['remaining_candidates']):<22} "
+            f"{weights}"
         )
 
 

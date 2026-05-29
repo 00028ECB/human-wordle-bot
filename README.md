@@ -152,6 +152,141 @@ Built-in pattern and path overrides are tuned for `second-map-bucket`. They appl
 
 Use `--compare-strategies` to run the built-in `slate` leaderboard across baseline, second-map, trap, and bucket strategies with both answer-only and allowed second-guess pools.
 
+## Pure Mode And Human Mode
+
+Wordle Lab can be used in two broad ways:
+
+- **Pure Mode** treats every answer in the answer list as equally likely. This is best for strategy research, regression testing, and apples-to-apples benchmarks.
+- **Human Mode** uses prior-answer history to model real Wordle play. It can exclude or downweight words that have already appeared.
+
+The current Pure Mode benchmark champion is:
+
+```text
+strategy: second-map-bucket
+first guess: slate
+second-guess-pool: answers
+average: 3.47
+5s: 39
+6s: 0
+risk: 78
+```
+
+Human Mode uses these local prior-answer files:
+
+- `data/prior_answers.txt`
+- `data/prior_answers_dated.csv`
+
+`data/prior_answers.txt` is a plain word list, one lowercase five-letter answer per line.
+
+`data/prior_answers_dated.csv` has two columns:
+
+```csv
+date,word
+2025-08-31,petal
+2021-06-19,cigar
+```
+
+### Prior Answer Commands
+
+Show plain prior-answer stats:
+
+```bash
+python -m src.wordle_lab --prior-stats
+```
+
+Show dated prior-answer stats:
+
+```bash
+python -m src.wordle_lab --prior-dated-stats
+```
+
+Show prior weight buckets for the configured answer list:
+
+```bash
+python -m src.wordle_lab \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --as-of-date 2026-05-28 \
+  --prior-weight-stats
+```
+
+Clean a pasted or downloaded historical answer source into `data/prior_answers.txt`:
+
+```bash
+python -m src.wordle_lab \
+  --answers data/wordle_answers_full.txt \
+  --clean-prior-source downloads/past_wordle_answers_raw.txt data/prior_answers.txt
+```
+
+The cleaner extracts lowercase five-letter alphabetic words, deduplicates them in first-seen order, keeps only words from the configured answer list, and writes one word per line.
+
+### Prior Policies
+
+Use `--prior-policy` to choose how prior answers affect solving:
+
+- `ignore` keeps current behavior. Prior answers are loaded for stats only.
+- `exclude` removes prior answers from tested targets and solution candidates, while still allowing them as guesses/probes.
+- `downweight` keeps prior answers possible, but prefers less-recent or never-used answers in small endgame choices.
+
+`exclude` is mostly diagnostic because modern Wordle can reuse answers. For real-world Human Mode, prefer `--prior-policy downweight`.
+
+### Prior Weight Buckets
+
+When `--prior-policy downweight` is used with `--prior-answers-dated`, each tested answer gets a deterministic weight:
+
+```text
+never used:               1.00
+used within last 90 days: 0.05
+used 91-365 days ago:    0.15
+used 366-730 days ago:   0.35
+used more than 730 days:  0.60
+```
+
+The date basis comes from `--as-of-date YYYY-MM-DD`. If no date is provided, Wordle Lab uses the latest date in the dated prior file, or today when the file is empty.
+
+### Weighted Human-Mode Scoring
+
+Pure Mode reports the normal uniform benchmark score. Human Mode can also report a weighted score:
+
+```bash
+python -m src.wordle_lab \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --strategy second-map-bucket \
+  --first slate \
+  --second-guess-pool answers \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --prior-policy downweight \
+  --as-of-date 2026-05-28 \
+  --show-weighted-score
+```
+
+The weighted average is:
+
+```text
+sum(prior_weight * guesses) / sum(prior_weight)
+```
+
+The report also includes weighted `<=3`, `<=4`, `5s`, `6s`, and failed totals.
+
+To inspect choices changed by dated prior weighting:
+
+```bash
+python -m src.wordle_lab \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --strategy second-map-bucket \
+  --first slate \
+  --second-guess-pool answers \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --prior-policy downweight \
+  --as-of-date 2026-05-28 \
+  --show-prior-weighting-changes
+```
+
+This diagnostic prints the normal guess, weighted guess, remaining candidates, prior weights, answer, and guess number for changed decisions.
+
 ## Word Lists
 
 The starter word lists in `data/` are tiny so the project stays easy to inspect.
