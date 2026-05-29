@@ -18,6 +18,8 @@ from src.wordle_lab.__main__ import (
     WORST_GAME_COLUMNS,
     apply_second_guess_overrides,
     answer_likelihood_score,
+    apply_prior_policy_to_candidates,
+    apply_prior_policy_to_test_answers,
     build_comparison_rows,
     build_comparison_row,
     build_parser,
@@ -62,11 +64,13 @@ from src.wordle_lab.__main__ import (
     load_built_second_map,
     open_incremental_built_second_map_csv,
     main,
+    play_baseline_game,
     play_second_map_game,
     print_built_second_map,
     print_final_clusters,
     print_final_cluster_override_changes,
     print_opener_strategy_report,
+    print_prior_stats_report,
     print_small_order_changes,
     tune_pattern_objective_rank,
     print_worst_prefixes,
@@ -135,6 +139,24 @@ class CliTests(unittest.TestCase):
         args = build_parser().parse_args(["--stats"])
 
         self.assertTrue(args.stats)
+
+    def test_parser_accepts_prior_stats_mode(self):
+        args = build_parser().parse_args(["--prior-stats"])
+
+        self.assertTrue(args.prior_stats)
+
+    def test_parser_accepts_prior_answer_options(self):
+        args = build_parser().parse_args(
+            [
+                "--prior-answers",
+                "data/prior_answers.txt",
+                "--prior-policy",
+                "exclude",
+            ]
+        )
+
+        self.assertEqual(args.prior_answers, "data/prior_answers.txt")
+        self.assertEqual(args.prior_policy, "exclude")
 
     def test_parser_accepts_second_guess_map(self):
         args = build_parser().parse_args(["--second-guess-map", "slate"])
@@ -593,6 +615,62 @@ class CliTests(unittest.TestCase):
         self.assertIn("Allowed guesses: 3", report)
         self.assertIn("Overlap: 2", report)
         self.assertIn("Allowed-only guesses: 1", report)
+
+    def test_main_reports_prior_stats_for_custom_word_lists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_path = temp_path / "prior.txt"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            prior_path.write_text("slate\ncigar\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--prior-answers",
+                        str(prior_path),
+                        "--prior-stats",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("Answers: 3", report)
+        self.assertIn("Prior answers: 2", report)
+        self.assertIn("Prior answers found in answer list: 1", report)
+        self.assertIn("Remaining non-prior answers: 2", report)
+
+    def test_main_rejects_invalid_prior_answer_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_path = temp_path / "prior.txt"
+            answers_path.write_text("raise\nslate\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\n", encoding="utf-8")
+            prior_path.write_text("SLATE\n", encoding="utf-8")
+            error_output = io.StringIO()
+
+            with redirect_stderr(error_output), self.assertRaises(SystemExit):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--prior-answers",
+                        str(prior_path),
+                        "--prior-stats",
+                    ]
+                )
+
+        self.assertIn("Invalid word", error_output.getvalue())
 
     def test_main_reports_second_guess_map_for_custom_word_lists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2069,6 +2147,83 @@ class CliTests(unittest.TestCase):
         self.assertEqual(len(changes), 1)
         self.assertEqual(changes[0]["unweighted_choice"], "jazzy")
         self.assertEqual(changes[0]["weighted_choice"], "crane")
+
+    def test_apply_prior_policy_excludes_prior_answers_when_possible(self):
+        candidates = ("raise", "slate", "crane")
+
+        filtered = apply_prior_policy_to_candidates(
+            candidates,
+            prior_answers=("raise", "slate"),
+            prior_policy="exclude",
+        )
+
+        self.assertEqual(filtered, ("crane",))
+
+    def test_apply_prior_policy_keeps_candidates_when_exclude_would_empty(self):
+        candidates = ("raise", "slate")
+
+        filtered = apply_prior_policy_to_candidates(
+            candidates,
+            prior_answers=("raise", "slate"),
+            prior_policy="exclude",
+        )
+
+        self.assertEqual(filtered, candidates)
+
+    def test_apply_prior_policy_excludes_prior_answers_from_test_set(self):
+        answers = ("raise", "slate", "crane")
+
+        tested_answers = apply_prior_policy_to_test_answers(
+            answers,
+            prior_answers=("raise",),
+            prior_policy="exclude",
+        )
+
+        self.assertEqual(tested_answers, ("slate", "crane"))
+
+    def test_choose_answer_candidate_downweights_prior_answers(self):
+        candidates = ("raise", "slate", "crane")
+
+        guess = choose_answer_candidate(
+            candidates,
+            (),
+            candidates,
+            "off",
+            prior_answers=("raise", "slate"),
+            prior_policy="downweight",
+        )
+
+        self.assertEqual(guess, "crane")
+
+    def test_play_baseline_game_excludes_prior_candidates(self):
+        words = ("raise", "slate", "crane")
+
+        game = play_baseline_game(
+            "crane",
+            words,
+            words,
+            "slate",
+            prior_answers=("raise", "slate"),
+            prior_policy="exclude",
+        )
+
+        self.assertEqual(game.guesses, ("slate", "crane"))
+
+    def test_build_strategy_result_exclude_prior_reduces_tested_without_failure(self):
+        words = ("raise", "slate", "crane")
+
+        row, games = build_strategy_result(
+            "baseline",
+            "slate",
+            words,
+            words,
+            prior_answers=("raise",),
+            prior_policy="exclude",
+        )
+
+        self.assertEqual(row["tested"], 2)
+        self.assertEqual(row["failed"], 0)
+        self.assertEqual({game.answer for game in games}, {"slate", "crane"})
 
     def test_choose_answer_candidate_uses_small_candidate_order_for_two_or_three(self):
         candidates = ("femur", "fewer")

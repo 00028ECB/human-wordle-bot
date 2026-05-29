@@ -12,7 +12,9 @@ from .simulator import (
     DEFAULT_ALLOWED_GUESSES_PATH,
     DEFAULT_ANSWERS_PATH,
     DEFAULT_FIRST_GUESS,
+    DEFAULT_PRIOR_ANSWERS_PATH,
     GameResult,
+    load_words,
     load_word_lists,
     run_simulation,
 )
@@ -225,6 +227,11 @@ def build_parser():
         "--stats",
         action="store_true",
         help="show word list statistics",
+    )
+    mode.add_argument(
+        "--prior-stats",
+        action="store_true",
+        help="show prior-answer statistics",
     )
     mode.add_argument(
         "--second-guess-map",
@@ -494,6 +501,17 @@ def build_parser():
         default=str(DEFAULT_ALLOWED_GUESSES_PATH),
         help=f"allowed guess word list (default: {DEFAULT_ALLOWED_GUESSES_PATH})",
     )
+    parser.add_argument(
+        "--prior-answers",
+        default=str(DEFAULT_PRIOR_ANSWERS_PATH),
+        help=f"prior answer word list (default: {DEFAULT_PRIOR_ANSWERS_PATH})",
+    )
+    parser.add_argument(
+        "--prior-policy",
+        choices=("ignore", "exclude", "downweight"),
+        default="ignore",
+        help="how to treat prior answers while solving (default: ignore)",
+    )
     return parser
 
 
@@ -565,6 +583,7 @@ def main(argv=None):
             allowed_path=args.allowed,
             answers_path=args.answers,
         )
+        prior_answers = load_words(args.prior_answers)
     except (FileNotFoundError, ValueError) as error:
         parser.error(str(error))
 
@@ -585,6 +604,8 @@ def main(argv=None):
                 max_expected_states=args.max_expected_states,
                 expected_depth=args.expected_depth,
                 final_cluster_overrides=args.final_cluster_overrides,
+                prior_answers=prior_answers,
+                prior_policy=args.prior_policy,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -600,6 +621,8 @@ def main(argv=None):
             use_overrides=False if args.no_overrides else None,
             answer_weighting=args.answer_weighting,
             small_candidate_order=args.small_candidate_order,
+            prior_answers=prior_answers,
+            prior_policy=args.prior_policy,
         )
         print_strategy_report(rows)
         if args.csv:
@@ -752,6 +775,8 @@ def main(argv=None):
                     else None
                 ),
                 built_second_map_path=args.use_built_second_map,
+                prior_answers=prior_answers,
+                prior_policy=args.prior_policy,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -800,6 +825,9 @@ def main(argv=None):
     if args.stats:
         print_stats_report(allowed_guesses, possible_answers)
         return
+    if args.prior_stats:
+        print_prior_stats_report(possible_answers, prior_answers)
+        return
     if args.second_guess_map:
         second_guess_pool = (
             allowed_guesses if args.second_guess_pool == "allowed" else possible_answers
@@ -845,11 +873,38 @@ def main(argv=None):
             write_comparison_csv(args.csv, rows)
         return
 
-    result = run_simulation(
-        allowed_guesses=allowed_guesses,
-        possible_answers=possible_answers,
-        first_guess=args.first.lower(),
-    )
+    if args.prior_policy == "ignore":
+        result = run_simulation(
+            allowed_guesses=allowed_guesses,
+            possible_answers=possible_answers,
+            first_guess=args.first.lower(),
+        )
+    else:
+        tested_answers = apply_prior_policy_to_test_answers(
+            possible_answers,
+            prior_answers,
+            args.prior_policy,
+        )
+        games = tuple(
+            play_baseline_game(
+                answer,
+                allowed_guesses,
+                tested_answers,
+                args.first.lower(),
+                prior_answers=prior_answers,
+                prior_policy=args.prior_policy,
+            )
+            for answer in tested_answers
+        )
+        result = type("Result", (), {
+            "games": games,
+            "solved_count": sum(1 for game in games if game.solved),
+            "failed_count": sum(1 for game in games if not game.solved),
+            "average_guesses": sum(game.guess_count for game in games) / len(games) if games else 0,
+            "guess_distribution": Counter(
+                game.guess_count for game in games if game.solved and game.guess_count in range(1, 7)
+            ),
+        })()
 
     print("Wordle Lab baseline strategy")
     print(f"Answers tested: {len(result.games)}")
@@ -872,6 +927,18 @@ def print_stats_report(allowed_guesses, possible_answers):
     print(f"Allowed guesses: {len(allowed_guesses)}")
     print(f"Overlap: {len(overlap)}")
     print(f"Allowed-only guesses: {len(allowed_only)}")
+
+
+def print_prior_stats_report(possible_answers, prior_answers):
+    answer_words = set(possible_answers)
+    prior_words = set(prior_answers)
+    found_prior_answers = answer_words & prior_words
+    remaining_non_prior_answers = answer_words - prior_words
+
+    print(f"Answers: {len(possible_answers)}")
+    print(f"Prior answers: {len(prior_answers)}")
+    print(f"Prior answers found in answer list: {len(found_prior_answers)}")
+    print(f"Remaining non-prior answers: {len(remaining_non_prior_answers)}")
 
 
 def print_timing_report(elapsed_seconds, opener_count):
@@ -2160,6 +2227,8 @@ def build_strategy_comparison_rows(
     max_expected_states=50000,
     expected_depth=2,
     final_cluster_overrides="off",
+    prior_answers=(),
+    prior_policy="ignore",
 ):
     strategy_specs = (
         ("baseline", "", 2),
@@ -2189,6 +2258,8 @@ def build_strategy_comparison_rows(
             max_expected_states=max_expected_states,
             expected_depth=expected_depth,
             final_cluster_overrides=final_cluster_overrides,
+            prior_answers=prior_answers,
+            prior_policy=prior_policy,
         )
         if strategy == "baseline":
             row = {**row, "second_guess_pool": "-"}
@@ -2211,6 +2282,8 @@ def build_opener_strategy_comparison_rows(
     max_expected_states=50000,
     expected_depth=2,
     final_cluster_overrides="off",
+    prior_answers=(),
+    prior_policy="ignore",
 ):
     rows = []
     for first_guess in first_guesses:
@@ -2233,6 +2306,8 @@ def build_opener_strategy_comparison_rows(
             max_expected_states=max_expected_states,
             expected_depth=expected_depth,
             final_cluster_overrides=final_cluster_overrides,
+            prior_answers=prior_answers,
+            prior_policy=prior_policy,
         )
         rows.append(format_opener_strategy_row(row))
     return tuple(rows)
@@ -2270,6 +2345,8 @@ def build_strategy_row(
     max_expected_states=50000,
     expected_depth=2,
     final_cluster_overrides="off",
+    prior_answers=(),
+    prior_policy="ignore",
 ):
     row, _games = build_strategy_result(
         strategy,
@@ -2286,6 +2363,8 @@ def build_strategy_row(
         max_expected_states=max_expected_states,
         expected_depth=expected_depth,
         final_cluster_overrides=final_cluster_overrides,
+        prior_answers=prior_answers,
+        prior_policy=prior_policy,
     )
     return row
 
@@ -2309,19 +2388,27 @@ def build_strategy_result(
     final_cluster_overrides="off",
     final_cluster_override_changes=None,
     built_second_map_path=None,
+    prior_answers=(),
+    prior_policy="ignore",
 ):
     if first_guess not in allowed_guesses:
         raise ValueError(f"First guess {first_guess!r} is not in the allowed guess list.")
+    tested_answers = apply_prior_policy_to_test_answers(
+        possible_answers,
+        prior_answers,
+        prior_policy,
+    )
 
     if strategy == "baseline":
         if (
             answer_weighting == "off"
             and small_candidate_order == "normal"
             and final_cluster_overrides == "off"
+            and prior_policy == "ignore"
         ):
             result = run_simulation(
                 allowed_guesses=allowed_guesses,
-                possible_answers=possible_answers,
+                possible_answers=tested_answers,
                 first_guess=first_guess,
             )
             summary = build_comparison_row(first_guess, result)
@@ -2331,7 +2418,7 @@ def build_strategy_result(
                 play_baseline_game(
                     answer,
                     allowed_guesses,
-                    possible_answers,
+                    tested_answers,
                     first_guess,
                     answer_weighting,
                     weighting_changes,
@@ -2339,8 +2426,10 @@ def build_strategy_result(
                     small_order_changes,
                     final_cluster_overrides,
                     final_cluster_override_changes,
+                    prior_answers,
+                    prior_policy,
                 )
-                for answer in possible_answers
+                for answer in tested_answers
             )
             summary = build_summary_row_from_games(first_guess, games)
         return {
@@ -2362,7 +2451,7 @@ def build_strategy_result(
             and tuned_overrides_enabled(strategy, use_overrides)
         )
         second_guess_pool = (
-            allowed_guesses if second_guess_pool_name == "allowed" else possible_answers
+            allowed_guesses if second_guess_pool_name == "allowed" else tested_answers
         )
         if built_second_map_path:
             second_guess_by_pattern = load_built_second_map(
@@ -2372,14 +2461,14 @@ def build_strategy_result(
             )
             validate_second_guess_map_patterns(
                 first_guess,
-                possible_answers,
+                tested_answers,
                 second_guess_by_pattern,
             )
         else:
             second_guess_rows = build_second_guess_map_rows(
                 first_guess,
                 allowed_guesses,
-                possible_answers,
+                tested_answers,
                 second_guess_pool=second_guess_pool,
             )
             second_guess_by_pattern = {
@@ -2404,7 +2493,7 @@ def build_strategy_result(
             play_second_map_game(
                 answer,
                 allowed_guesses,
-                possible_answers,
+                tested_answers,
                 first_guess,
                 second_guess_by_pattern,
                 use_trap_avoidance=(strategy == "second-map-trap"),
@@ -2423,8 +2512,10 @@ def build_strategy_result(
                 final_cluster_override_changes=final_cluster_override_changes,
                 use_overrides=effective_use_overrides,
                 second_guess_pool_name=second_guess_pool_name,
+                prior_answers=prior_answers,
+                prior_policy=prior_policy,
             )
-            for answer in possible_answers
+            for answer in tested_answers
         )
         summary = build_summary_row_from_games(first_guess, games)
         row = {
@@ -2467,9 +2558,15 @@ def play_second_map_game(
     final_cluster_override_changes=None,
     use_overrides=False,
     second_guess_pool_name="allowed",
+    prior_answers=(),
+    prior_policy="ignore",
 ):
     guesses = []
-    candidates = tuple(possible_answers)
+    candidates = apply_prior_policy_to_candidates(
+        possible_answers,
+        prior_answers,
+        prior_policy,
+    )
     if probe_pool is None:
         probe_pool = allowed_guesses
 
@@ -2479,6 +2576,7 @@ def play_second_map_game(
         return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
 
     candidates = filter_candidates_by_feedback(candidates, first_guess, first_feedback)
+    candidates = apply_prior_policy_to_candidates(candidates, prior_answers, prior_policy)
     second_guess = second_guess_by_pattern[first_feedback]
     second_feedback = score_guess(second_guess, answer)
     guesses.append(second_guess)
@@ -2486,6 +2584,7 @@ def play_second_map_game(
         return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
 
     candidates = filter_candidates_by_feedback(candidates, second_guess, second_feedback)
+    candidates = apply_prior_policy_to_candidates(candidates, prior_answers, prior_policy)
     path_override = None
     if use_overrides:
         path_override = find_path_guess_override(
@@ -2522,12 +2621,15 @@ def play_second_map_game(
                 expected_optimizer,
                 final_cluster_overrides,
                 final_cluster_override_changes,
+                prior_answers,
+                prior_policy,
             )
         feedback = score_guess(next_guess, answer)
         guesses.append(next_guess)
         if is_solved(feedback):
             return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
         candidates = filter_candidates_by_feedback(candidates, next_guess, feedback)
+        candidates = apply_prior_policy_to_candidates(candidates, prior_answers, prior_policy)
 
     return GameResult(answer=answer, guesses=tuple(guesses), solved=False)
 
@@ -2543,9 +2645,15 @@ def play_baseline_game(
     small_order_changes=None,
     final_cluster_overrides="off",
     final_cluster_override_changes=None,
+    prior_answers=(),
+    prior_policy="ignore",
 ):
     guesses = []
-    candidates = tuple(possible_answers)
+    candidates = apply_prior_policy_to_candidates(
+        possible_answers,
+        prior_answers,
+        prior_policy,
+    )
 
     while candidates:
         if guesses:
@@ -2561,6 +2669,8 @@ def play_baseline_game(
                 small_order_changes,
                 final_cluster_overrides,
                 final_cluster_override_changes,
+                prior_answers,
+                prior_policy,
             )
         else:
             next_guess = first_guess
@@ -2570,6 +2680,7 @@ def play_baseline_game(
         if is_solved(feedback):
             return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
         candidates = filter_candidates_by_feedback(candidates, next_guess, feedback)
+        candidates = apply_prior_policy_to_candidates(candidates, prior_answers, prior_policy)
 
     return GameResult(answer=answer, guesses=tuple(guesses), solved=False)
 
@@ -2578,6 +2689,27 @@ def filter_candidates_by_feedback(candidates, guess, feedback):
     return tuple(
         candidate for candidate in candidates if score_guess(guess, candidate) == feedback
     )
+
+
+def apply_prior_policy_to_candidates(candidates, prior_answers=(), prior_policy="ignore"):
+    candidates = tuple(candidates)
+    if prior_policy in {"ignore", "downweight"}:
+        return candidates
+    if prior_policy != "exclude":
+        raise ValueError(f"Unsupported prior policy: {prior_policy}")
+    prior_answer_set = set(prior_answers)
+    if not prior_answer_set:
+        return candidates
+    filtered_candidates = tuple(candidate for candidate in candidates if candidate not in prior_answer_set)
+    return filtered_candidates or candidates
+
+
+def apply_prior_policy_to_test_answers(possible_answers, prior_answers=(), prior_policy="ignore"):
+    if prior_policy != "exclude":
+        if prior_policy not in {"ignore", "downweight"}:
+            raise ValueError(f"Unsupported prior policy: {prior_policy}")
+        return tuple(possible_answers)
+    return apply_prior_policy_to_candidates(possible_answers, prior_answers, prior_policy)
 
 
 def choose_next_candidate(candidates, previous_guesses, allowed_guesses):
@@ -2596,6 +2728,8 @@ def choose_answer_candidate(
     small_order_changes=None,
     final_cluster_overrides="off",
     final_cluster_override_changes=None,
+    prior_answers=(),
+    prior_policy="ignore",
 ):
     allowed = set(allowed_guesses)
     previous = set(previous_guesses)
@@ -2612,12 +2746,23 @@ def choose_answer_candidate(
         raise ValueError(f"Unsupported small-candidate order mode: {small_candidate_order}")
     if final_cluster_overrides not in {"off", "on"}:
         raise ValueError(f"Unsupported final-cluster override mode: {final_cluster_overrides}")
+    if prior_policy not in {"ignore", "exclude", "downweight"}:
+        raise ValueError(f"Unsupported prior policy: {prior_policy}")
 
-    unweighted_choice = available_candidates[0]
+    choice_candidates = available_candidates
+    if prior_policy == "downweight":
+        prior_answer_set = set(prior_answers)
+        non_prior_candidates = [
+            candidate for candidate in available_candidates if candidate not in prior_answer_set
+        ]
+        if non_prior_candidates:
+            choice_candidates = non_prior_candidates
+
+    unweighted_choice = choice_candidates[0]
     base_choice = unweighted_choice
     if answer_weighting == "simple":
         base_choice = max(
-            available_candidates,
+            choice_candidates,
             key=lambda candidate: (answer_likelihood_score(candidate), -candidates.index(candidate)),
         )
         if weighting_changes is not None and base_choice != unweighted_choice:
@@ -2649,7 +2794,7 @@ def choose_answer_candidate(
         and len(candidates) in (2, 3)
         and (guess_number or 0) >= 4
     ):
-        ordered_choice = choose_small_candidate_by_likelihood(available_candidates)
+        ordered_choice = choose_small_candidate_by_likelihood(choice_candidates)
         if small_order_changes is not None and ordered_choice != base_choice:
             small_order_changes.append(
                 {
@@ -2878,6 +3023,8 @@ def choose_next_guess_with_optional_probe(
     expected_optimizer=None,
     final_cluster_overrides="off",
     final_cluster_override_changes=None,
+    prior_answers=(),
+    prior_policy="ignore",
 ):
     if final_cluster_overrides == "on":
         override_guess = find_final_cluster_override(candidates, previous_guesses)
@@ -2892,6 +3039,10 @@ def choose_next_guess_with_optional_probe(
                 guess_number,
                 "normal",
                 None,
+                "off",
+                None,
+                prior_answers,
+                prior_policy,
             )
             if (
                 final_cluster_override_changes is not None
@@ -2927,6 +3078,10 @@ def choose_next_guess_with_optional_probe(
             guess_number,
             small_candidate_order,
             small_order_changes,
+            "off",
+            None,
+            prior_answers,
+            prior_policy,
         )
     if use_hybrid_strategy:
         return choose_hybrid_guess(
@@ -2941,6 +3096,8 @@ def choose_next_guess_with_optional_probe(
             small_order_changes,
             answer,
             guess_number,
+            prior_answers,
+            prior_policy,
         )
     if use_bucket_strategy:
         probe = choose_bucket_probe(candidates, previous_guesses, probe_pool)
@@ -2956,6 +3113,10 @@ def choose_next_guess_with_optional_probe(
             guess_number,
             small_candidate_order,
             small_order_changes,
+            "off",
+            None,
+            prior_answers,
+            prior_policy,
         )
     if use_trap_avoidance and is_trap_family(candidates):
         probe = choose_trap_probe(candidates, previous_guesses, probe_pool)
@@ -2971,6 +3132,10 @@ def choose_next_guess_with_optional_probe(
         guess_number,
         small_candidate_order,
         small_order_changes,
+        "off",
+        None,
+        prior_answers,
+        prior_policy,
     )
 
 
@@ -2986,6 +3151,8 @@ def choose_hybrid_guess(
     small_order_changes=None,
     answer=None,
     guess_number=None,
+    prior_answers=(),
+    prior_policy="ignore",
 ):
     normal_guess = choose_answer_candidate(
         candidates,
@@ -2997,6 +3164,10 @@ def choose_hybrid_guess(
         guess_number,
         small_candidate_order,
         small_order_changes,
+        "off",
+        None,
+        prior_answers,
+        prior_policy,
     )
     normal_max_bucket = max(feedback_bucket_sizes(normal_guess, candidates))
     if normal_max_bucket > trap_threshold:
