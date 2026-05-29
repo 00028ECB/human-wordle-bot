@@ -93,7 +93,21 @@ TUNE_PATTERN_COLUMNS = (
     "risk_score",
 )
 
+TUNE_PATTERN_WEIGHTED_COLUMNS = TUNE_PATTERN_COLUMNS + (
+    "weighted_avg",
+    "weighted_5s",
+    "weighted_6s",
+    "weighted_risk",
+)
+
 TUNE_PATTERN_BRANCH_COLUMNS = TUNE_PATTERN_COLUMNS + (
+    "worst_branch_pattern",
+    "worst_branch_candidates",
+    "worst_branch_fives",
+    "worst_branch_risk",
+)
+
+TUNE_PATTERN_WEIGHTED_BRANCH_COLUMNS = TUNE_PATTERN_WEIGHTED_COLUMNS + (
     "worst_branch_pattern",
     "worst_branch_candidates",
     "worst_branch_fives",
@@ -166,6 +180,12 @@ SECOND_GUESS_OVERRIDES = {
     ("slate", "G..Y.", "answers"): "count",
     ("slate", "..G..", "answers"): "grind",
     ("slate", "Y....", "answers"): "missy",
+}
+
+HUMAN_MODE_SECOND_GUESS_OVERRIDES = {
+    ("slate", "....Y", "answers", "downweight"): "drown",
+    ("slate", "..YY.", "answers", "downweight"): "hound",
+    ("slate", "..Y.Y", "answers", "downweight"): "began",
 }
 
 PATH_GUESS_OVERRIDES = {
@@ -346,6 +366,12 @@ def build_parser():
         help="show first-feedback patterns ranked by risk for --strategy",
     )
     parser.add_argument(
+        "--weighted-worst-patterns",
+        type=int,
+        metavar="N",
+        help="show first-feedback patterns ranked by weighted Human Mode risk for --strategy",
+    )
+    parser.add_argument(
         "--worst-prefixes",
         type=int,
         metavar="N",
@@ -412,7 +438,7 @@ def build_parser():
     )
     parser.add_argument(
         "--tune-pattern-objective",
-        choices=("risk", "branch-safe", "safe-balanced"),
+        choices=("risk", "branch-safe", "safe-balanced", "weighted-risk"),
         default="risk",
         help="ranking objective for --tune-pattern (default: risk)",
     )
@@ -590,6 +616,10 @@ def main(argv=None):
         raise SystemExit("--worst-patterns must be at least 1 when a limit is provided")
     if args.worst_patterns is not None and not args.strategy:
         raise SystemExit("--worst-patterns can only be used with --strategy")
+    if args.weighted_worst_patterns is not None and args.weighted_worst_patterns < 1:
+        raise SystemExit("--weighted-worst-patterns must be at least 1")
+    if args.weighted_worst_patterns is not None and not args.strategy:
+        raise SystemExit("--weighted-worst-patterns can only be used with --strategy")
     if args.worst_prefixes is not None and args.worst_prefixes < 1:
         raise SystemExit("--worst-prefixes must be at least 1")
     if args.worst_prefixes is not None and not args.strategy:
@@ -608,8 +638,10 @@ def main(argv=None):
         raise SystemExit("--show-small-candidate-events can only be used with --strategy")
     if args.show_small_candidate_events is not None and args.show_small_candidate_events < 1:
         raise SystemExit("--show-small-candidate-events must be at least 1")
-    if args.show_weighted_score and not args.strategy:
-        raise SystemExit("--show-weighted-score can only be used with --strategy")
+    if args.show_weighted_score and not (args.strategy or args.tune_pattern):
+        raise SystemExit("--show-weighted-score can only be used with --strategy or --tune-pattern")
+    if args.tune_pattern_objective == "weighted-risk" and not args.tune_pattern:
+        raise SystemExit("--tune-pattern-objective weighted-risk can only be used with --tune-pattern")
     if args.trap_threshold < 1:
         raise SystemExit("--trap-threshold must be at least 1")
     if args.endgame_threshold < 1:
@@ -670,6 +702,11 @@ def main(argv=None):
         dated_prior_answers,
         as_of_date,
     )
+    if args.tune_pattern_objective == "weighted-risk":
+        if args.prior_policy != "downweight":
+            parser.error("--tune-pattern-objective weighted-risk requires --prior-policy downweight")
+        if not dated_prior_answers:
+            parser.error("--tune-pattern-objective weighted-risk requires dated prior answers")
 
     if args.prior_weight_stats:
         print_prior_weight_stats_report(possible_answers, prior_answer_weights)
@@ -767,15 +804,29 @@ def main(argv=None):
                 small_candidate_order=args.small_candidate_order,
                 branch_summary=args.branch_summary,
                 objective=args.tune_pattern_objective,
+                prior_answer_weights=prior_answer_weights,
+                include_weighted_columns=(
+                    args.show_weighted_score
+                    or args.tune_pattern_objective == "weighted-risk"
+                ),
+                max_second_guesses=args.max_second_guesses,
+                second_guess_candidates=args.second_guess_candidates,
+                show_progress=True,
+                csv_path=args.csv,
             )
         except ValueError as error:
             parser.error(str(error))
-        print_tune_pattern_report(rows, branch_summary=args.branch_summary)
+        print_tune_pattern_report(
+            rows,
+            branch_summary=args.branch_summary,
+            include_weighted_columns=(
+                args.show_weighted_score
+                or args.tune_pattern_objective == "weighted-risk"
+            ),
+        )
         pattern_worst_limit = args.show_pattern_worst or args.show_worst
         if pattern_worst_limit and args.second:
             print_worst_games(build_worst_game_rows(pattern_games, pattern_worst_limit))
-        if args.csv:
-            write_tune_pattern_csv(args.csv, rows)
         return
     if args.tune_branch:
         first_guess, first_pattern, second_guess, second_pattern = args.tune_branch
@@ -918,6 +969,15 @@ def main(argv=None):
         if args.worst_patterns is not None:
             pattern_limit = None if args.worst_patterns == -1 else args.worst_patterns
             print_worst_patterns(build_worst_pattern_rows(games, pattern_limit))
+        if args.weighted_worst_patterns:
+            print_weighted_worst_patterns(
+                build_weighted_worst_pattern_rows(
+                    games,
+                    prior_answer_weights,
+                    args.weighted_worst_patterns,
+                ),
+                enabled=args.prior_policy == "downweight",
+            )
         if args.worst_prefixes:
             print_worst_prefixes(build_worst_prefix_rows(games, args.worst_prefixes))
         if args.show_final_clusters:
@@ -1289,6 +1349,12 @@ def build_tune_pattern_rows(
     small_candidate_order="normal",
     branch_summary=False,
     objective="risk",
+    prior_answer_weights=None,
+    include_weighted_columns=False,
+    max_second_guesses=None,
+    second_guess_candidates="all",
+    show_progress=False,
+    csv_path=None,
 ):
     rows, _games = build_tune_pattern_result(
         first_guess,
@@ -1303,6 +1369,12 @@ def build_tune_pattern_rows(
         small_candidate_order=small_candidate_order,
         branch_summary=branch_summary,
         objective=objective,
+        prior_answer_weights=prior_answer_weights,
+        include_weighted_columns=include_weighted_columns,
+        max_second_guesses=max_second_guesses,
+        second_guess_candidates=second_guess_candidates,
+        show_progress=show_progress,
+        csv_path=csv_path,
     )
     return rows
 
@@ -1321,6 +1393,12 @@ def build_tune_pattern_result(
     small_candidate_order="normal",
     branch_summary=False,
     objective="risk",
+    prior_answer_weights=None,
+    include_weighted_columns=False,
+    max_second_guesses=None,
+    second_guess_candidates="all",
+    show_progress=False,
+    csv_path=None,
 ):
     validate_tune_pattern(first_guess, pattern, strategy, allowed_guesses)
     if second_guess is not None and second_guess not in second_guess_pool:
@@ -1333,36 +1411,89 @@ def build_tune_pattern_result(
 
     rows = []
     selected_second_guesses = (second_guess,) if second_guess else second_guess_pool
-    selected_games = ()
-    for current_second_guess in selected_second_guesses:
-        games = tuple(
-            play_tuned_pattern_game(
-                answer,
-                allowed_guesses,
-                candidates,
-                first_guess,
-                pattern,
-                current_second_guess,
-                strategy,
-                second_guess_pool,
-                trap_threshold,
-                answer_weighting,
-                small_candidate_order,
-            )
-            for answer in candidates
+    if second_guess is None:
+        selected_second_guesses = select_second_guess_candidates(
+            second_guess_pool,
+            candidates,
+            max_second_guesses=max_second_guesses,
+            mode=second_guess_candidates,
         )
-        if second_guess:
-            selected_games = games
-        rows.append(
-            build_tune_pattern_row(
+    if not selected_second_guesses:
+        raise ValueError(f"No second guesses selected for pattern {pattern!r}.")
+    selected_games = ()
+    writer_context = None
+    if csv_path:
+        writer_context = open_incremental_tune_pattern_csv(
+            csv_path,
+            branch_summary=branch_summary or objective == "branch-safe",
+            include_weighted_columns=(
+                include_weighted_columns or objective == "weighted-risk"
+            ),
+        )
+    best_row = None
+    best_rank = None
+    pattern_start = time.perf_counter()
+    total_second_guesses = len(selected_second_guesses)
+    try:
+        csv_file = None
+        writer = None
+        if writer_context is not None:
+            csv_file, writer = writer_context
+        for index, current_second_guess in enumerate(selected_second_guesses, start=1):
+            games = tuple(
+                play_tuned_pattern_game(
+                    answer,
+                    allowed_guesses,
+                    candidates,
+                    first_guess,
+                    pattern,
+                    current_second_guess,
+                    strategy,
+                    second_guess_pool,
+                    trap_threshold,
+                    answer_weighting,
+                    small_candidate_order,
+                )
+                for answer in candidates
+            )
+            if second_guess:
+                selected_games = games
+            row = build_tune_pattern_row(
                 pattern,
                 current_second_guess,
                 len(candidates),
                 games,
                 candidates,
                 branch_summary=branch_summary or objective == "branch-safe",
+                prior_answer_weights=prior_answer_weights,
+                include_weighted_columns=(
+                    include_weighted_columns or objective == "weighted-risk"
+                ),
             )
-        )
+            rows.append(row)
+            rank = tune_pattern_objective_rank(row, objective)
+            if best_rank is None or rank < best_rank:
+                best_row = row
+                best_rank = rank
+            if writer is not None:
+                writer.writerow(row)
+                csv_file.flush()
+            if show_progress and (index % 100 == 0 or index == total_second_guesses):
+                elapsed = time.perf_counter() - pattern_start
+                risk_label = "weighted risk" if objective == "weighted-risk" else "risk"
+                risk_value = (
+                    best_row["weighted_risk"]
+                    if objective == "weighted-risk"
+                    else best_row["risk_score"]
+                )
+                print(
+                    f"Pattern {pattern}: evaluated {index}/{total_second_guesses} "
+                    f"second guesses; current best {best_row['second_guess']} "
+                    f"{risk_label} {risk_value}; elapsed {elapsed:.2f}s"
+                )
+    finally:
+        if writer_context is not None:
+            writer_context[0].close()
 
     ranked_rows = sorted(
         rows,
@@ -1399,6 +1530,16 @@ def tune_pattern_objective_rank(row, objective="risk"):
             row["fives"],
             row["risk_score"],
             average,
+            row["second_guess"],
+        )
+    if objective == "weighted-risk":
+        return (
+            float(row["weighted_6s"]),
+            float(row["weighted_risk"]),
+            float(row["weighted_5s"]),
+            float(row["weighted_avg"]),
+            row["sixes"],
+            row["risk_score"],
             row["second_guess"],
         )
     raise ValueError(f"Unsupported tune-pattern objective: {objective}")
@@ -1780,6 +1921,8 @@ def apply_second_guess_overrides(
     second_guess_pool_name,
     second_guess_pool,
     second_guess_by_pattern,
+    prior_policy="ignore",
+    prior_answer_weights=None,
 ):
     pool = set(second_guess_pool)
     for (override_first, pattern, override_pool), override_guess in SECOND_GUESS_OVERRIDES.items():
@@ -1793,6 +1936,27 @@ def apply_second_guess_overrides(
                 f"is not in the {second_guess_pool_name} second-guess pool."
             )
         second_guess_by_pattern[pattern] = override_guess
+    if prior_policy == "downweight" and prior_answer_weights:
+        for (
+            override_first,
+            pattern,
+            override_pool,
+            override_prior_policy,
+        ), override_guess in HUMAN_MODE_SECOND_GUESS_OVERRIDES.items():
+            if (
+                override_first != first_guess
+                or override_pool != second_guess_pool_name
+                or override_prior_policy != prior_policy
+            ):
+                continue
+            if pattern not in second_guess_by_pattern:
+                continue
+            if override_guess not in pool:
+                raise ValueError(
+                    f"Human Mode override {override_guess!r} for {first_guess!r} {pattern!r} "
+                    f"is not in the {second_guess_pool_name} second-guess pool."
+                )
+            second_guess_by_pattern[pattern] = override_guess
 
 
 def find_path_guess_override(
@@ -1916,6 +2080,8 @@ def build_tune_pattern_row(
     games,
     candidates=(),
     branch_summary=False,
+    prior_answer_weights=None,
+    include_weighted_columns=False,
 ):
     summary = build_summary_row_from_games(second_guess, games)
     row = {
@@ -1930,9 +2096,26 @@ def build_tune_pattern_row(
         "failed": summary["failed"],
         "risk_score": summary["risk_score"],
     }
+    if include_weighted_columns:
+        row.update(build_tune_pattern_weighted_metrics(games, prior_answer_weights))
     if branch_summary:
         row.update(build_second_feedback_branch_summary(second_guess, candidates, games))
     return row
+
+
+def build_tune_pattern_weighted_metrics(games, prior_answer_weights=None):
+    weighted = build_weighted_score_row(games, prior_answer_weights or {})
+    weighted_risk = (
+        weighted["weighted_fives"] * 2
+        + weighted["weighted_sixes"] * 5
+        + weighted["weighted_failed"] * 20
+    )
+    return {
+        "weighted_avg": f"{weighted['weighted_average']:.2f}",
+        "weighted_5s": f"{weighted['weighted_fives']:.2f}",
+        "weighted_6s": f"{weighted['weighted_sixes']:.2f}",
+        "weighted_risk": f"{weighted_risk:.2f}",
+    }
 
 
 def build_second_feedback_branch_summary(second_guess, candidates, games):
@@ -1984,14 +2167,18 @@ def build_second_feedback_branch_summary(second_guess, candidates, games):
     return worst_branch
 
 
-def print_tune_pattern_report(rows, branch_summary=False):
+def print_tune_pattern_report(rows, branch_summary=False, include_weighted_columns=False):
     if branch_summary:
-        print(
-            "Pattern  Second  Candidates  Avg   <=3   <=4   5s  6s  Fail  Risk  "
-            "Worst2  WorstN  Worst5s  WorstRisk"
+        header = (
+            "Pattern  Second  Candidates  Avg   <=3   <=4   5s  6s  Fail  Risk"
         )
     else:
-        print("Pattern  Second  Candidates  Avg   <=3   <=4   5s  6s  Fail  Risk")
+        header = "Pattern  Second  Candidates  Avg   <=3   <=4   5s  6s  Fail  Risk"
+    if include_weighted_columns:
+        header += "  WAvg   W5s    W6s    WRisk"
+    if branch_summary:
+        header += "  Worst2  WorstN  Worst5s  WorstRisk"
+    print(header)
     for row in rows:
         line = (
             f"{row['pattern']:<8} "
@@ -2005,6 +2192,13 @@ def print_tune_pattern_report(rows, branch_summary=False):
             f"{row['failed']:<5} "
             f"{row['risk_score']}"
         )
+        if include_weighted_columns:
+            line += (
+                f"     {row['weighted_avg']:<6} "
+                f"{row['weighted_5s']:<6} "
+                f"{row['weighted_6s']:<6} "
+                f"{row['weighted_risk']}"
+            )
         if branch_summary:
             line += (
                 f"     {row['worst_branch_pattern']:<7} "
@@ -2816,6 +3010,8 @@ def build_strategy_result(
                     second_guess_pool_name,
                     second_guess_pool,
                     second_guess_by_pattern,
+                    prior_policy=prior_policy,
+                    prior_answer_weights=prior_answer_weights,
                 )
         expected_optimizer = None
         if strategy == "second-map-expected":
@@ -3902,6 +4098,29 @@ def build_worst_pattern_rows(games, limit=None):
     return tuple(ranked_rows[:limit])
 
 
+def build_weighted_worst_pattern_rows(games, prior_answer_weights, limit):
+    grouped_games = defaultdict(list)
+    for game in games:
+        if not game.guesses:
+            continue
+        pattern = score_guess(game.guesses[0], game.answer)
+        grouped_games[pattern].append(game)
+
+    rows = tuple(
+        format_weighted_worst_pattern_row(pattern, group, prior_answer_weights)
+        for pattern, group in grouped_games.items()
+    )
+    ranked_rows = sorted(
+        rows,
+        key=lambda row: (
+            -row["weighted_risk_value"],
+            -row["weighted_avg_value"],
+            row["pattern"],
+        ),
+    )
+    return tuple(strip_weighted_worst_pattern_sort_values(row) for row in ranked_rows[:limit])
+
+
 def build_worst_prefix_rows(games, limit, prefix_lengths=(2, 3, 4)):
     grouped_games = defaultdict(list)
     for game in games:
@@ -4010,6 +4229,50 @@ def format_worst_pattern_row(pattern, games):
     }
 
 
+def format_weighted_worst_pattern_row(pattern, games, prior_answer_weights):
+    total_weight = 0.0
+    weighted_guess_sum = 0.0
+    weighted_fives = 0.0
+    weighted_sixes = 0.0
+    weighted_failed = 0.0
+    max_guesses = 0
+
+    for game in games:
+        weight = prior_weight_for_word(game.answer, prior_answer_weights)
+        total_weight += weight
+        weighted_guess_sum += weight * game.guess_count
+        max_guesses = max(max_guesses, game.guess_count)
+        if game.solved and game.guess_count == 5:
+            weighted_fives += weight
+        if game.solved and game.guess_count == 6:
+            weighted_sixes += weight
+        if not game.solved:
+            weighted_failed += weight
+
+    weighted_average = weighted_guess_sum / total_weight if total_weight else 0
+    weighted_risk = weighted_fives * 2 + weighted_sixes * 5 + weighted_failed * 20
+    return {
+        "pattern": pattern,
+        "games": len(games),
+        "total_weight": f"{total_weight:.2f}",
+        "weighted_avg": f"{weighted_average:.2f}",
+        "weighted_5s": f"{weighted_fives:.2f}",
+        "weighted_6s": f"{weighted_sixes:.2f}",
+        "weighted_risk": f"{weighted_risk:.2f}",
+        "max_guesses": max_guesses,
+        "weighted_risk_value": weighted_risk,
+        "weighted_avg_value": weighted_average,
+    }
+
+
+def strip_weighted_worst_pattern_sort_values(row):
+    return {
+        key: value
+        for key, value in row.items()
+        if key not in {"weighted_risk_value", "weighted_avg_value"}
+    }
+
+
 def format_worst_game_row(game, possible_answers=None):
     feedbacks = tuple(score_guess(guess, game.answer) for guess in game.guesses)
     path = " -> ".join(game.guesses)
@@ -4059,6 +4322,25 @@ def print_worst_patterns(rows):
             f"{row['sixes']:<3} "
             f"{row['max_guesses']:<4} "
             f"{row['risk']}"
+        )
+
+
+def print_weighted_worst_patterns(rows, enabled=True):
+    if not enabled:
+        print("Weighted worst patterns: disabled")
+        return
+    print("Weighted worst patterns:")
+    print("pattern  games  total_weight  weighted_avg  weighted_5s  weighted_6s  weighted_risk  max_guesses")
+    for row in rows:
+        print(
+            f"{row['pattern']:<8} "
+            f"{row['games']:<6} "
+            f"{row['total_weight']:<13} "
+            f"{row['weighted_avg']:<13} "
+            f"{row['weighted_5s']:<12} "
+            f"{row['weighted_6s']:<12} "
+            f"{row['weighted_risk']:<14} "
+            f"{row['max_guesses']}"
         )
 
 
@@ -4569,20 +4851,46 @@ def open_incremental_built_second_map_csv(path, force=False):
     return csv_file, writer
 
 
+def open_incremental_tune_pattern_csv(path, branch_summary=False, include_weighted_columns=False):
+    csv_path = Path(path)
+    if csv_path.parent != Path("."):
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_file = csv_path.open("w", newline="", encoding="utf-8")
+    writer = csv.DictWriter(
+        csv_file,
+        fieldnames=tune_pattern_csv_columns(
+            branch_summary=branch_summary,
+            include_weighted_columns=include_weighted_columns,
+        ),
+    )
+    writer.writeheader()
+    csv_file.flush()
+    return csv_file, writer
+
+
 def write_tune_pattern_csv(path, rows):
     csv_path = Path(path)
     if csv_path.parent != Path("."):
         csv_path.parent.mkdir(parents=True, exist_ok=True)
 
     with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
-        fieldnames = (
-            TUNE_PATTERN_BRANCH_COLUMNS
-            if rows and "worst_branch_pattern" in rows[0]
-            else TUNE_PATTERN_COLUMNS
+        fieldnames = tune_pattern_csv_columns(
+            branch_summary=bool(rows and "worst_branch_pattern" in rows[0]),
+            include_weighted_columns=bool(rows and "weighted_avg" in rows[0]),
         )
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def tune_pattern_csv_columns(branch_summary=False, include_weighted_columns=False):
+    if branch_summary and include_weighted_columns:
+        return TUNE_PATTERN_WEIGHTED_BRANCH_COLUMNS
+    if branch_summary:
+        return TUNE_PATTERN_BRANCH_COLUMNS
+    if include_weighted_columns:
+        return TUNE_PATTERN_WEIGHTED_COLUMNS
+    return TUNE_PATTERN_COLUMNS
 
 
 def write_tune_branch_csv(path, rows):

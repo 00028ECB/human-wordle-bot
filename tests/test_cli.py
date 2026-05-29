@@ -14,6 +14,7 @@ from src.wordle_lab.__main__ import (
     TUNE_PATTERN_BRANCH_COLUMNS,
     TUNE_BRANCH_COLUMNS,
     TUNE_PATTERN_COLUMNS,
+    TUNE_PATTERN_WEIGHTED_COLUMNS,
     TUNE_PATH_COLUMNS,
     TUNE_PATH_BRANCH_COLUMNS,
     WORST_GAME_COLUMNS,
@@ -27,6 +28,7 @@ from src.wordle_lab.__main__ import (
     build_prior_answer_weights,
     build_prior_weight_stats,
     build_weighted_score_row,
+    build_weighted_worst_pattern_rows,
     build_parser,
     build_full_second_map_rows,
     build_second_map_row_for_pattern,
@@ -85,6 +87,7 @@ from src.wordle_lab.__main__ import (
     print_prior_weight_stats_report,
     print_prior_weighting_changes,
     print_weighted_score_report,
+    print_weighted_worst_patterns,
     print_small_candidate_events,
     print_small_order_changes,
     record_small_candidate_event,
@@ -383,6 +386,19 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.tune_pattern_objective, "branch-safe")
 
+    def test_parser_accepts_tune_pattern_weighted_risk_objective(self):
+        args = build_parser().parse_args(
+            [
+                "--tune-pattern",
+                "slate",
+                ".....",
+                "--tune-pattern-objective",
+                "weighted-risk",
+            ]
+        )
+
+        self.assertEqual(args.tune_pattern_objective, "weighted-risk")
+
     def test_parser_accepts_strategy(self):
         args = build_parser().parse_args(["--strategy", "second-map", "--first", "slate"])
 
@@ -541,6 +557,20 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertEqual(args.worst_patterns, 20)
+
+    def test_parser_accepts_weighted_worst_patterns_limit(self):
+        args = build_parser().parse_args(
+            [
+                "--strategy",
+                "second-map-bucket",
+                "--first",
+                "slate",
+                "--weighted-worst-patterns",
+                "25",
+            ]
+        )
+
+        self.assertEqual(args.weighted_worst_patterns, 25)
 
     def test_parser_accepts_worst_prefixes(self):
         args = build_parser().parse_args(
@@ -1536,6 +1566,89 @@ class CliTests(unittest.TestCase):
         report = output.getvalue()
         self.assertIn("Pattern  Second  Candidates", report)
         self.assertIn("GGGGG", report)
+        self.assertIn("evaluated", report)
+
+    def test_main_tune_pattern_supports_second_guess_limits_and_incremental_csv(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            csv_path = temp_path / "results" / "tune_pattern.csv"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--tune-pattern",
+                        "slate",
+                        "GGGGG",
+                        "--strategy",
+                        "second-map-bucket",
+                        "--second-guess-pool",
+                        "answers",
+                        "--second-guess-candidates",
+                        "top",
+                        "--max-second-guesses",
+                        "1",
+                        "--top",
+                        "1",
+                        "--csv",
+                        str(csv_path),
+                    ]
+                )
+
+            csv_text = csv_path.read_text(encoding="utf-8")
+
+        self.assertIn("evaluated 1/1 second guesses", output.getvalue())
+        self.assertEqual(len(csv_text.strip().splitlines()), 2)
+        self.assertIn("pattern,second_guess,candidates", csv_text)
+
+    def test_main_reports_tune_pattern_weighted_columns(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_dated_path = temp_path / "prior_dated.csv"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            prior_dated_path.write_text("date,word\n2025-08-01,slate\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--tune-pattern",
+                        "slate",
+                        "GGGGG",
+                        "--strategy",
+                        "second-map-bucket",
+                        "--second-guess-pool",
+                        "answers",
+                        "--prior-answers-dated",
+                        str(prior_dated_path),
+                        "--prior-policy",
+                        "downweight",
+                        "--as-of-date",
+                        "2025-09-01",
+                        "--show-weighted-score",
+                        "--top",
+                        "1",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("WAvg", report)
+        self.assertIn("WRisk", report)
 
     def test_main_reports_tune_pattern_branch_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1837,6 +1950,46 @@ class CliTests(unittest.TestCase):
         report = output.getvalue()
         self.assertIn("Worst patterns:", report)
         self.assertIn("pattern  games  avg", report)
+
+    def test_main_strategy_weighted_worst_patterns_prints_pattern_table(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_dated_path = temp_path / "prior_dated.csv"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            prior_dated_path.write_text("date,word\n2025-08-01,raise\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--strategy",
+                        "second-map",
+                        "--first",
+                        "slate",
+                        "--second-guess-pool",
+                        "answers",
+                        "--prior-answers-dated",
+                        str(prior_dated_path),
+                        "--prior-policy",
+                        "downweight",
+                        "--as-of-date",
+                        "2025-09-01",
+                        "--weighted-worst-patterns",
+                        "2",
+                        "--no-overrides",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("Weighted worst patterns:", report)
+        self.assertIn("pattern  games  total_weight", report)
 
     def test_main_strategy_worst_patterns_allows_non_slate_first_guess(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2225,6 +2378,46 @@ class CliTests(unittest.TestCase):
         self.assertEqual(second_guess_by_pattern["..G.."], "grind")
         self.assertEqual(second_guess_by_pattern["Y...."], "missy")
 
+    def test_apply_second_guess_overrides_uses_human_mode_override_with_weights(self):
+        second_guess_by_pattern = {
+            "....Y": "heron",
+            "..YY.": "tacit",
+            "..Y.Y": "abbey",
+        }
+
+        apply_second_guess_overrides(
+            "slate",
+            "answers",
+            ("rocky", "drown", "pouch", "hound", "march", "began"),
+            second_guess_by_pattern,
+            prior_policy="downweight",
+            prior_answer_weights={"cigar": 0.05},
+        )
+
+        self.assertEqual(second_guess_by_pattern["....Y"], "drown")
+        self.assertEqual(second_guess_by_pattern["..YY."], "hound")
+        self.assertEqual(second_guess_by_pattern["..Y.Y"], "began")
+
+    def test_apply_second_guess_overrides_keeps_pure_override_without_weights(self):
+        second_guess_by_pattern = {
+            "....Y": "heron",
+            "..YY.": "tacit",
+            "..Y.Y": "abbey",
+        }
+
+        apply_second_guess_overrides(
+            "slate",
+            "answers",
+            ("rocky", "drown", "pouch", "hound", "march", "began"),
+            second_guess_by_pattern,
+            prior_policy="downweight",
+            prior_answer_weights={},
+        )
+
+        self.assertEqual(second_guess_by_pattern["....Y"], "rocky")
+        self.assertEqual(second_guess_by_pattern["..YY."], "pouch")
+        self.assertEqual(second_guess_by_pattern["..Y.Y"], "march")
+
     def test_apply_second_guess_overrides_rejects_invalid_pool_word(self):
         second_guess_by_pattern = {"....Y": "heron"}
 
@@ -2288,6 +2481,88 @@ class CliTests(unittest.TestCase):
         self.assertEqual(second_guess_by_pattern["G..Y."], "cough")
         self.assertEqual(second_guess_by_pattern["..G.."], "grove")
         self.assertEqual(second_guess_by_pattern["Y...."], "mimic")
+
+    def test_build_strategy_result_keeps_pure_slate_override(self):
+        words = (
+            "slate",
+            "cider",
+            "frond",
+            "tough",
+            "deter",
+            "rocky",
+            "brick",
+            "randy",
+            "march",
+            "pouch",
+            "rally",
+            "dilly",
+            "count",
+            "grind",
+            "missy",
+            "drown",
+        )
+
+        _row, games = build_strategy_result(
+            "second-map-bucket",
+            "slate",
+            words,
+            words,
+            second_guess_pool_name="answers",
+            prior_policy="ignore",
+        )
+
+        cider_game = next(game for game in games if game.answer == "cider")
+        self.assertEqual(cider_game.guesses[1], "rocky")
+
+    def test_build_strategy_result_uses_human_mode_slate_override(self):
+        words = (
+            "slate",
+            "cider",
+            "frond",
+            "tough",
+            "deter",
+            "rocky",
+            "brick",
+            "randy",
+            "march",
+            "pouch",
+            "rally",
+            "dilly",
+            "count",
+            "grind",
+            "missy",
+            "drown",
+        )
+
+        _row, games = build_strategy_result(
+            "second-map-bucket",
+            "slate",
+            words,
+            words,
+            second_guess_pool_name="answers",
+            prior_policy="downweight",
+            prior_answer_weights={"cider": 0.05},
+        )
+
+        cider_game = next(game for game in games if game.answer == "cider")
+        self.assertEqual(cider_game.guesses[1], "drown")
+
+    def test_build_strategy_result_no_overrides_disables_human_mode_override(self):
+        words = ("slate", "cider", "rocky", "drown")
+
+        _row, games = build_strategy_result(
+            "second-map-bucket",
+            "slate",
+            words,
+            words,
+            second_guess_pool_name="answers",
+            use_overrides=False,
+            prior_policy="downweight",
+            prior_answer_weights={"cider": 0.05},
+        )
+
+        cider_game = next(game for game in games if game.answer == "cider")
+        self.assertNotEqual(cider_game.guesses[1], "drown")
 
     def test_build_strategy_result_does_not_apply_slate_overrides_to_other_openers(self):
         allowed_words = ("trace", "frond", "pound", "cough", "pouch")
@@ -3173,6 +3448,63 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
 
+    def test_build_weighted_worst_pattern_rows_uses_prior_weights(self):
+        games = (
+            GameResult(
+                answer="cigar",
+                guesses=("slate", "crane", "raise", "trace", "cigar"),
+                solved=True,
+            ),
+            GameResult(
+                answer="petal",
+                guesses=("slate", "crane", "raise", "trace", "petal", "petal"),
+                solved=True,
+            ),
+            GameResult(
+                answer="raise",
+                guesses=("slate", "crane", "raise", "trace", "petal", "cigar"),
+                solved=False,
+            ),
+        )
+
+        rows = build_weighted_worst_pattern_rows(
+            games,
+            {"cigar": 0.05, "petal": 0.60},
+            limit=3,
+        )
+        rows_by_pattern = {row["pattern"]: row for row in rows}
+
+        self.assertEqual(rows_by_pattern["..Y.."]["total_weight"], "0.05")
+        self.assertEqual(rows_by_pattern["..Y.."]["weighted_5s"], "0.05")
+        self.assertEqual(rows_by_pattern["..Y.."]["weighted_risk"], "0.10")
+        self.assertEqual(rows_by_pattern[".YYYY"]["weighted_6s"], "0.60")
+        self.assertEqual(rows_by_pattern[".YYYY"]["weighted_risk"], "3.00")
+        self.assertEqual(rows_by_pattern["Y.Y.G"]["weighted_risk"], "20.00")
+
+    def test_print_weighted_worst_patterns_outputs_table(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_weighted_worst_patterns(
+                (
+                    {
+                        "pattern": "..Y..",
+                        "games": 2,
+                        "total_weight": "1.05",
+                        "weighted_avg": "4.95",
+                        "weighted_5s": "1.05",
+                        "weighted_6s": "0.00",
+                        "weighted_risk": "2.10",
+                        "max_guesses": 5,
+                    },
+                )
+            )
+
+        report = output.getvalue()
+        self.assertIn("Weighted worst patterns:", report)
+        self.assertIn("weighted_risk", report)
+        self.assertIn("..Y..", report)
+
     def test_build_worst_prefix_rows_groups_long_games_by_prefix(self):
         games = (
             GameResult(
@@ -3314,6 +3646,47 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rows[0]["candidates"], 1)
         self.assertIn(rows[0]["second_guess"], answer_words)
 
+    def test_build_tune_pattern_rows_can_limit_second_guesses(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        rows = build_tune_pattern_rows(
+            "slate",
+            "GGGGG",
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            second_guess_pool=answer_words,
+            top=25,
+            max_second_guesses=1,
+        )
+
+        self.assertEqual(len(rows), 1)
+
+    def test_build_tune_pattern_rows_supports_top_second_guess_candidates(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        rows = build_tune_pattern_rows(
+            "slate",
+            "GGGGG",
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            second_guess_pool=answer_words,
+            top=1,
+            max_second_guesses=1,
+            second_guess_candidates="top",
+        )
+
+        expected = select_second_guess_candidates(
+            answer_words,
+            ("slate",),
+            max_second_guesses=1,
+            mode="top",
+        )[0]
+        self.assertEqual(rows[0]["second_guess"], expected)
+
     def test_build_tune_pattern_rows_can_include_branch_summary(self):
         allowed_words = ("raise", "slate", "crane", "trace")
         answer_words = ("raise", "slate", "crane")
@@ -3375,6 +3748,56 @@ class CliTests(unittest.TestCase):
             tune_pattern_objective_rank(safer, "branch-safe"),
             tune_pattern_objective_rank(branchy, "branch-safe"),
         )
+
+    def test_tune_pattern_objective_rank_supports_weighted_risk(self):
+        normal_safe = {
+            "second_guess": "alpha",
+            "average": "3.00",
+            "fives": 0,
+            "sixes": 0,
+            "risk_score": 0,
+            "weighted_avg": "3.20",
+            "weighted_5s": "0.00",
+            "weighted_6s": "0.05",
+            "weighted_risk": "0.25",
+        }
+        weighted_safe = {
+            "second_guess": "bravo",
+            "average": "3.50",
+            "fives": 2,
+            "sixes": 1,
+            "risk_score": 9,
+            "weighted_avg": "3.40",
+            "weighted_5s": "0.20",
+            "weighted_6s": "0.00",
+            "weighted_risk": "0.40",
+        }
+
+        self.assertLess(
+            tune_pattern_objective_rank(weighted_safe, "weighted-risk"),
+            tune_pattern_objective_rank(normal_safe, "weighted-risk"),
+        )
+
+    def test_build_tune_pattern_rows_can_include_weighted_columns(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        rows = build_tune_pattern_rows(
+            "slate",
+            "GGGGG",
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            second_guess_pool=answer_words,
+            top=1,
+            prior_answer_weights={"slate": 0.05},
+            include_weighted_columns=True,
+        )
+
+        self.assertIn("weighted_avg", rows[0])
+        self.assertIn("weighted_5s", rows[0])
+        self.assertIn("weighted_6s", rows[0])
+        self.assertIn("weighted_risk", rows[0])
 
     def test_tune_pattern_branch_safe_can_rank_without_printing_branch_columns(self):
         allowed_words = ("raise", "slate", "crane", "trace")
@@ -4308,6 +4731,51 @@ class CliTests(unittest.TestCase):
         self.assertIn("Pattern  Second  Candidates", report)
         self.assertIn("pattern,second_guess,candidates", csv_text)
 
+    def test_main_tune_pattern_weighted_csv_writes_weighted_columns(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_dated_path = temp_path / "prior_dated.csv"
+            csv_path = temp_path / "results" / "tune_pattern_weighted.csv"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            prior_dated_path.write_text("date,word\n2025-08-01,slate\n", encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--tune-pattern",
+                        "slate",
+                        "GGGGG",
+                        "--strategy",
+                        "second-map-bucket",
+                        "--second-guess-pool",
+                        "answers",
+                        "--prior-answers-dated",
+                        str(prior_dated_path),
+                        "--prior-policy",
+                        "downweight",
+                        "--as-of-date",
+                        "2025-09-01",
+                        "--tune-pattern-objective",
+                        "weighted-risk",
+                        "--top",
+                        "1",
+                        "--csv",
+                        str(csv_path),
+                    ]
+                )
+
+            csv_text = csv_path.read_text(encoding="utf-8")
+
+        self.assertIn(",".join(TUNE_PATTERN_WEIGHTED_COLUMNS), csv_text)
+        self.assertIn("weighted_avg", csv_text)
+
     def test_main_tune_pattern_branch_summary_csv_writes_branch_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -4729,6 +5197,14 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             main(["--strategy", "baseline", "--first", "slate", "--worst-patterns", "0"])
 
+    def test_weighted_worst_patterns_requires_strategy(self):
+        with self.assertRaises(SystemExit):
+            main(["--weighted-worst-patterns", "5"])
+
+    def test_weighted_worst_patterns_requires_positive_limit(self):
+        with self.assertRaises(SystemExit):
+            main(["--strategy", "baseline", "--first", "slate", "--weighted-worst-patterns", "0"])
+
     def test_worst_prefixes_requires_strategy(self):
         with self.assertRaises(SystemExit):
             main(["--worst-prefixes", "5"])
@@ -4764,6 +5240,41 @@ class CliTests(unittest.TestCase):
     def test_show_small_candidate_events_requires_positive_limit(self):
         with self.assertRaises(SystemExit):
             main(["--strategy", "baseline", "--show-small-candidate-events", "0"])
+
+    def test_show_weighted_score_requires_strategy_or_tune_pattern(self):
+        with self.assertRaises(SystemExit):
+            main(["--show-weighted-score"])
+
+    def test_weighted_risk_objective_requires_tune_pattern(self):
+        with self.assertRaises(SystemExit):
+            main(["--build-second-map", "slate", "--tune-pattern-objective", "weighted-risk"])
+
+    def test_weighted_risk_objective_requires_downweight_policy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_dated_path = temp_path / "prior_dated.csv"
+            answers_path.write_text("slate\n", encoding="utf-8")
+            allowed_path.write_text("slate\n", encoding="utf-8")
+            prior_dated_path.write_text("date,word\n2025-08-01,slate\n", encoding="utf-8")
+
+            with self.assertRaises(SystemExit):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--prior-answers-dated",
+                        str(prior_dated_path),
+                        "--tune-pattern",
+                        "slate",
+                        "GGGGG",
+                        "--tune-pattern-objective",
+                        "weighted-risk",
+                    ]
+                )
 
     def test_trap_threshold_requires_positive_limit(self):
         with self.assertRaises(SystemExit):

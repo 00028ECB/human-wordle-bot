@@ -136,6 +136,32 @@ Use `--worst-patterns` to group solved games by the first feedback pattern and r
 
 Use `--tune-pattern FIRST PATTERN` to focus on one first-feedback bucket and rank possible second guesses. The ranking prefers lower risk, then lower average guesses, then more solves in four or fewer guesses. Add `--csv` to save the tuning table.
 
+Long `--tune-pattern` runs print progress while evaluating second guesses:
+
+```text
+Pattern .....: evaluated 100/2315 second guesses; current best frond risk 12; elapsed 42.10s
+```
+
+Use these options for faster tuning passes before running an exhaustive search:
+
+```bash
+python -m src.wordle_lab \
+  --tune-pattern slate ..... \
+  --strategy second-map-bucket \
+  --second-guess-pool answers \
+  --second-guess-candidates top \
+  --max-second-guesses 100 \
+  --top 25
+```
+
+`--second-guess-candidates all` preserves exhaustive behavior and is the default.
+
+`--second-guess-candidates top` uses the same deterministic pre-ranked subset used by `--build-second-map`.
+
+`--max-second-guesses N` limits how many second guesses are evaluated for the pattern.
+
+When `--csv` is supplied for `--tune-pattern`, rows are written incrementally as each second guess is evaluated, so interrupted long runs still leave useful partial output.
+
 Add `--branch-summary` to tune-pattern output to show whether each second guess creates an ugly second-feedback branch.
 
 Add `--second WORD` to evaluate one second guess for that pattern. Pair it with `--show-worst N` or `--show-pattern-worst N` to inspect the hardest answers inside that first-feedback bucket.
@@ -286,6 +312,44 @@ python -m src.wordle_lab \
 ```
 
 This diagnostic prints the normal guess, weighted guess, remaining candidates, prior weights, answer, and guess number for changed decisions.
+
+To find the first-feedback patterns that are worst under weighted Human Mode risk:
+
+```bash
+python -m src.wordle_lab \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --strategy second-map-bucket \
+  --first slate \
+  --second-guess-pool answers \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --prior-policy downweight \
+  --as-of-date 2026-05-28 \
+  --show-weighted-score \
+  --weighted-worst-patterns 25
+```
+
+`--weighted-worst-patterns` keeps the normal `--worst-patterns` report unchanged. It groups games by first-guess feedback pattern and ranks them by weighted Human Mode risk, using weighted 5s, weighted 6s, and weighted failures.
+
+For Human Mode tuning, `--tune-pattern` also supports a weighted objective:
+
+```bash
+python -m src.wordle_lab \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --tune-pattern slate ....Y \
+  --strategy second-map-bucket \
+  --second-guess-pool answers \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --prior-policy downweight \
+  --as-of-date 2026-05-28 \
+  --tune-pattern-objective weighted-risk \
+  --top 25
+```
+
+`weighted-risk` is only for `--tune-pattern` with dated prior answers and `--prior-policy downweight`. It ranks second guesses by fewer weighted 6s, lower weighted risk, fewer weighted 5s, lower weighted average, then the normal 6s/risk tie-breakers. When `--show-weighted-score` or `--tune-pattern-objective weighted-risk` is used with `--tune-pattern`, the table includes `weighted_avg`, `weighted_5s`, `weighted_6s`, and `weighted_risk`.
+
+Human Mode can also use different tuned pattern overrides from Pure Mode. For example, Pure Mode keeps the `slate` / `....Y` / `answers` override at `rocky`, while Human Mode with `--prior-policy downweight` and dated prior answers uses `drown` for that same first-feedback pattern. Human Mode also uses `hound` for `..YY.` and `began` for `..Y.Y`, while Pure Mode keeps `pouch` and `march`. Use `--no-overrides` to disable both Pure Mode and Human Mode overrides.
 
 ## Word Lists
 
