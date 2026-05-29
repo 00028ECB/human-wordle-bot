@@ -27,6 +27,7 @@ from src.wordle_lab.__main__ import (
     build_prior_dated_stats,
     build_prior_answer_weights,
     build_prior_weight_stats,
+    build_recommendation,
     build_weighted_score_row,
     build_weighted_worst_pattern_rows,
     build_parser,
@@ -86,6 +87,7 @@ from src.wordle_lab.__main__ import (
     print_prior_dated_stats_report,
     print_prior_weight_stats_report,
     print_prior_weighting_changes,
+    print_recommendation,
     print_weighted_score_report,
     print_weighted_worst_patterns,
     print_small_candidate_events,
@@ -321,6 +323,14 @@ class CliTests(unittest.TestCase):
             args.tune_path,
             ["slate", "....Y", "rocky", "Y....", "fiend", "..Y.."],
         )
+
+    def test_parser_accepts_recommend_state(self):
+        args = build_parser().parse_args(
+            ["--recommend", "--state", "slate", "....Y", "drown", ".Y..."]
+        )
+
+        self.assertTrue(args.recommend)
+        self.assertEqual(args.state, ["slate", "....Y", "drown", ".Y..."])
 
     def test_parser_accepts_top_for_tune_pattern(self):
         args = build_parser().parse_args(
@@ -1608,6 +1618,81 @@ class CliTests(unittest.TestCase):
         self.assertIn("evaluated 1/1 second guesses", output.getvalue())
         self.assertEqual(len(csv_text.strip().splitlines()), 2)
         self.assertIn("pattern,second_guess,candidates", csv_text)
+
+    def test_main_recommend_prints_pure_recommendation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            answers_path.write_text("cider\ndiner\npoker\nrocky\ndrown\n", encoding="utf-8")
+            allowed_path.write_text("slate\ncider\ndiner\npoker\nrocky\ndrown\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--recommend",
+                        "--strategy",
+                        "second-map-bucket",
+                        "--state",
+                        "slate",
+                        "....Y",
+                        "--second-guess-pool",
+                        "answers",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("Recommendation:", report)
+        self.assertIn("Remaining candidates: 3", report)
+        self.assertIn("Recommended next guess: rocky", report)
+        self.assertIn("Explanation: Used Pure Mode override for slate ....Y.", report)
+        self.assertNotIn("Prior weights:", report)
+
+    def test_main_recommend_prints_human_weights(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_dated_path = temp_path / "prior_dated.csv"
+            answers_path.write_text("cider\ndiner\npoker\nrocky\ndrown\n", encoding="utf-8")
+            allowed_path.write_text("slate\ncider\ndiner\npoker\nrocky\ndrown\n", encoding="utf-8")
+            prior_dated_path.write_text("date,word\n2025-08-01,cider\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--recommend",
+                        "--strategy",
+                        "second-map-bucket",
+                        "--state",
+                        "slate",
+                        "....Y",
+                        "--second-guess-pool",
+                        "answers",
+                        "--prior-answers-dated",
+                        str(prior_dated_path),
+                        "--prior-policy",
+                        "downweight",
+                        "--as-of-date",
+                        "2025-09-01",
+                    ]
+                )
+
+        report = output.getvalue()
+        self.assertIn("Recommended next guess: drown", report)
+        self.assertIn("Explanation: Used Human Mode override for slate ....Y.", report)
+        self.assertIn("Prior weights:", report)
+        self.assertIn("cider:0.05", report)
 
     def test_main_reports_tune_pattern_weighted_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4386,6 +4471,47 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(label, "slate ....Y rocky Y.... fiend ..Y..")
 
+    def test_build_recommendation_reports_candidate_weights_and_bucket_summary(self):
+        row = build_recommendation(
+            ("slate", "....Y"),
+            ("slate", "cider", "diner", "poker", "drown", "rocky"),
+            ("cider", "diner", "poker", "drown", "rocky"),
+            second_guess_pool_name="answers",
+            prior_policy="downweight",
+            prior_answer_weights={"cider": 0.05},
+        )
+
+        self.assertEqual(row["remaining_count"], 3)
+        self.assertIn("cider", row["top_candidates"])
+        self.assertIn("cider:0.05", row["prior_weights"])
+        self.assertEqual(row["recommended_guess"], "drown")
+        self.assertEqual(row["explanation"], "Used Human Mode override for slate ....Y.")
+        self.assertIn("max_bucket", row)
+
+    def test_print_recommendation_outputs_summary(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_recommendation(
+                {
+                    "path": "slate ....Y",
+                    "remaining_count": 3,
+                    "top_candidates": "cider, diner, poker",
+                    "prior_weights": "cider:0.05, diner:1.00, poker:1.00",
+                    "recommended_guess": "diner",
+                    "recommendation_type": "answer",
+                    "max_bucket": 1,
+                    "bucket_count": 3,
+                    "expected_remaining": "1.00",
+                    "explanation": "Chose diner as a possible answer using bucket safety.",
+                }
+            )
+
+        report = output.getvalue()
+        self.assertIn("Recommendation:", report)
+        self.assertIn("Recommended next guess: diner", report)
+        self.assertIn("Bucket summary:", report)
+
     def test_build_tune_pattern_rows_rejects_invalid_pattern(self):
         with self.assertRaises(ValueError):
             build_tune_pattern_rows(
@@ -5168,6 +5294,14 @@ class CliTests(unittest.TestCase):
     def test_compare_openers_with_strategy_requires_strategy(self):
         with self.assertRaises(SystemExit):
             main(["--compare-openers-with-strategy", "slate", "crane"])
+
+    def test_recommend_requires_state(self):
+        with self.assertRaises(SystemExit):
+            main(["--recommend"])
+
+    def test_state_requires_recommend(self):
+        with self.assertRaises(SystemExit):
+            main(["--state", "slate", "....Y"])
 
     def test_top_openers_requires_positive_limit(self):
         with self.assertRaises(SystemExit):

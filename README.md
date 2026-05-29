@@ -134,6 +134,33 @@ Use `--show-worst N` to print the hardest solved games after the strategy summar
 
 Use `--worst-patterns` to group solved games by the first feedback pattern and rank the hardest patterns by risk. Pass a number, such as `--worst-patterns 20`, to limit the table.
 
+Use `--recommend` to get a next-guess recommendation from a partial game state. The state is alternating guess/feedback pairs, and the recommendation uses the selected strategy's normal decision logic, including tuned overrides unless `--no-overrides` is supplied:
+
+```bash
+python -m src.wordle_lab \
+  --recommend \
+  --strategy second-map-bucket \
+  --second-guess-pool answers \
+  --state slate ....Y
+```
+
+Human Mode recommendations use dated prior-answer weights when provided:
+
+```bash
+python -m src.wordle_lab \
+  --recommend \
+  --strategy second-map-bucket \
+  --second-guess-pool answers \
+  --state slate ....Y drown .Y... \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --prior-policy downweight \
+  --as-of-date 2026-05-28
+```
+
+The recommendation report shows the remaining candidate count, top candidates, prior weights, recommended guess, whether it is an answer or probe, bucket summary, and a short explanation.
+
 Use `--tune-pattern FIRST PATTERN` to focus on one first-feedback bucket and rank possible second guesses. The ranking prefers lower risk, then lower average guesses, then more solves in four or fewer guesses. Add `--csv` to save the tuning table.
 
 Long `--tune-pattern` runs print progress while evaluating second guesses:

@@ -300,6 +300,11 @@ def build_parser():
         metavar="STEP",
         help="rank the next guess after an arbitrary guess/pattern path",
     )
+    mode.add_argument(
+        "--recommend",
+        action="store_true",
+        help="recommend the next guess from a partial game state",
+    )
     parser.add_argument(
         "--csv",
         help="write compare results to a CSV file",
@@ -532,6 +537,12 @@ def build_parser():
         help="evaluate one second guess for --tune-pattern",
     )
     parser.add_argument(
+        "--state",
+        nargs="+",
+        metavar="STEP",
+        help="alternating guess/feedback pairs for --recommend",
+    )
+    parser.add_argument(
         "--answers",
         default=str(DEFAULT_ANSWERS_PATH),
         help=f"possible answer word list (default: {DEFAULT_ANSWERS_PATH})",
@@ -593,13 +604,17 @@ def main(argv=None):
         args.compare or args.compare_openers_with_strategy or args.top_openers
         or args.second_guess_map or args.build_second_map or args.strategy
         or args.compare_strategies or args.tune_pattern or args.tune_branch
-        or args.tune_path
+        or args.tune_path or args.recommend
     ):
         raise SystemExit(
             "--csv can only be used with --compare, --compare-openers-with-strategy, --top-openers, --second-guess-map, --build-second-map, --strategy, --compare-strategies, --tune-pattern, --tune-branch, or --tune-path"
         )
     if args.compare_openers_with_strategy and not args.strategy:
         raise SystemExit("--compare-openers-with-strategy requires --strategy")
+    if args.recommend and not args.state:
+        raise SystemExit("--recommend requires --state")
+    if args.state and not args.recommend:
+        raise SystemExit("--state can only be used with --recommend")
     if args.top_openers is not None and args.top_openers < 1:
         raise SystemExit("--top-openers must be at least 1")
     if args.limit_openers is not None and args.limit_openers < 1:
@@ -710,6 +725,24 @@ def main(argv=None):
 
     if args.prior_weight_stats:
         print_prior_weight_stats_report(possible_answers, prior_answer_weights)
+        return
+
+    if args.recommend:
+        try:
+            row = build_recommendation(
+                args.state,
+                allowed_guesses,
+                possible_answers,
+                second_guess_pool_name=args.second_guess_pool,
+                prior_answers=prior_answers,
+                prior_policy=args.prior_policy,
+                prior_answer_weights=prior_answer_weights,
+                strategy=args.strategy or "second-map-bucket",
+                use_overrides=False if args.no_overrides else None,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+        print_recommendation(row)
         return
 
     if args.compare_openers_with_strategy:
@@ -1308,6 +1341,177 @@ def print_clean_prior_source_report(stats):
     print(f"valid Wordle answers written: {stats['valid_wordle_answers_written']}")
     print(f"duplicates skipped: {stats['duplicates_skipped']}")
     print(f"non-answer words skipped: {stats['non_answer_words_skipped']}")
+
+
+def build_recommendation(
+    state_steps,
+    allowed_guesses,
+    possible_answers,
+    second_guess_pool_name="allowed",
+    prior_answers=(),
+    prior_policy="ignore",
+    prior_answer_weights=None,
+    strategy="second-map-bucket",
+    use_overrides=None,
+):
+    path_guesses, path_patterns = parse_tune_path(state_steps, allowed_guesses)
+    candidates = filter_candidates_for_path(possible_answers, path_guesses, path_patterns)
+    candidates = apply_prior_policy_to_candidates(candidates, prior_answers, prior_policy)
+    if not candidates:
+        raise ValueError("No answers match the supplied recommendation state.")
+
+    probe_pool = allowed_guesses if second_guess_pool_name == "allowed" else possible_answers
+    override_mode = None
+    recommendation = find_recommendation_first_pattern_override(
+        path_guesses,
+        path_patterns,
+        second_guess_pool_name,
+        probe_pool,
+        strategy,
+        use_overrides,
+        prior_policy,
+        prior_answer_weights,
+    )
+    if recommendation is not None:
+        override_mode = (
+            "Human Mode"
+            if prior_policy == "downweight" and prior_answer_weights
+            else "Pure Mode"
+        )
+    if recommendation is None:
+        recommendation = choose_bucket_probe_with_prior_diagnostics(
+            candidates,
+            path_guesses,
+            probe_pool,
+            prior_policy=prior_policy,
+            prior_answer_weights=prior_answer_weights,
+        )
+    if recommendation is None:
+        recommendation = choose_answer_candidate(
+            candidates,
+            path_guesses,
+            allowed_guesses,
+            "off",
+            prior_policy=prior_policy,
+            prior_answer_weights=prior_answer_weights,
+        )
+
+    bucket_sizes = sorted(feedback_bucket_sizes(recommendation, candidates), reverse=True)
+    max_bucket = bucket_sizes[0] if bucket_sizes else 0
+    expected_remaining = (
+        sum(size * size for size in bucket_sizes) / len(candidates)
+        if candidates
+        else 0
+    )
+    is_possible_answer = recommendation in set(candidates)
+    return {
+        "path": format_tune_path_label(path_guesses, path_patterns),
+        "remaining_count": len(candidates),
+        "top_candidates": format_recommendation_candidates(candidates),
+        "prior_weights": (
+            format_prior_weights(candidates, prior_answer_weights)
+            if prior_policy == "downweight" and prior_answer_weights
+            else ""
+        ),
+        "recommended_guess": recommendation,
+        "recommendation_type": "answer" if is_possible_answer else "probe",
+        "max_bucket": max_bucket,
+        "bucket_count": len(bucket_sizes),
+        "expected_remaining": f"{expected_remaining:.2f}",
+        "explanation": build_recommendation_explanation(
+            recommendation,
+            is_possible_answer,
+            prior_policy,
+            prior_answer_weights,
+            override_mode=override_mode,
+            override_first=path_guesses[0],
+            override_pattern=path_patterns[0],
+        ),
+    }
+
+
+def find_recommendation_first_pattern_override(
+    path_guesses,
+    path_patterns,
+    second_guess_pool_name,
+    second_guess_pool,
+    strategy,
+    use_overrides,
+    prior_policy,
+    prior_answer_weights,
+):
+    if len(path_guesses) != 1 or len(path_patterns) != 1:
+        return None
+    first_guess = path_guesses[0]
+    if not (first_guess == "slate" and tuned_overrides_enabled(strategy, use_overrides)):
+        return None
+    pattern = path_patterns[0]
+    second_guess_by_pattern = {pattern: ""}
+    apply_second_guess_overrides(
+        first_guess,
+        second_guess_pool_name,
+        second_guess_pool,
+        second_guess_by_pattern,
+        prior_policy=prior_policy,
+        prior_answer_weights=prior_answer_weights,
+    )
+    return second_guess_by_pattern.get(pattern) or None
+
+
+def format_recommendation_candidates(candidates, limit=12):
+    shown = ", ".join(candidates[:limit])
+    if len(candidates) > limit:
+        return f"{shown}..."
+    return shown
+
+
+def format_prior_weights(candidates, prior_answer_weights=None, limit=12):
+    prior_answer_weights = prior_answer_weights or {}
+    shown = ", ".join(
+        f"{candidate}:{prior_weight_for_word(candidate, prior_answer_weights):.2f}"
+        for candidate in candidates[:limit]
+    )
+    if len(candidates) > limit:
+        return f"{shown}..."
+    return shown
+
+
+def build_recommendation_explanation(
+    recommendation,
+    is_possible_answer,
+    prior_policy,
+    prior_answer_weights=None,
+    override_mode=None,
+    override_first=None,
+    override_pattern=None,
+):
+    if override_mode:
+        return f"Used {override_mode} override for {override_first} {override_pattern}."
+    guess_type = "possible answer" if is_possible_answer else "probe"
+    if prior_policy == "downweight" and prior_answer_weights:
+        return (
+            f"Chose {recommendation} as a {guess_type} using bucket safety with "
+            "dated prior-answer weights as a tie-breaker."
+        )
+    return f"Chose {recommendation} as a {guess_type} using bucket safety."
+
+
+def print_recommendation(row):
+    print("Recommendation:")
+    print(f"State: {row['path']}")
+    print(f"Remaining candidates: {row['remaining_count']}")
+    print(f"Top candidates: {row['top_candidates']}")
+    if row["prior_weights"]:
+        print(f"Prior weights: {row['prior_weights']}")
+    print(f"Recommended next guess: {row['recommended_guess']}")
+    print(f"Recommendation type: {row['recommendation_type']}")
+    print(
+        "Bucket summary: "
+        f"max_bucket={row['max_bucket']}, "
+        f"bucket_count={row['bucket_count']}, "
+        f"expected_remaining={row['expected_remaining']}"
+    )
+    print(f"Explanation: {row['explanation']}")
 
 
 def print_timing_report(elapsed_seconds, opener_count):
