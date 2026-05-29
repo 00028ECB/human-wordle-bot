@@ -222,6 +222,49 @@ FINAL_CLUSTER_OVERRIDES = {
     ("never", "newer"): "newer",
 }
 
+PRIOR_WEIGHT_PRESETS = {
+    "current": {
+        "0-90": 0.05,
+        "91-365": 0.15,
+        "366-730": 0.35,
+        "730+": 0.60,
+        "never": 1.00,
+    },
+    "conservative": {
+        "0-90": 0.10,
+        "91-365": 0.25,
+        "366-730": 0.50,
+        "730+": 0.75,
+        "never": 1.00,
+    },
+    "aggressive": {
+        "0-90": 0.02,
+        "91-365": 0.10,
+        "366-730": 0.25,
+        "730+": 0.50,
+        "never": 1.00,
+    },
+    "repeat-friendly": {
+        "0-90": 0.15,
+        "91-365": 0.35,
+        "366-730": 0.60,
+        "730+": 0.85,
+        "never": 1.00,
+    },
+}
+
+PRIOR_WEIGHT_PRESET_COMPARISON_COLUMNS = (
+    "preset",
+    "total_weight",
+    "weighted_average",
+    "weighted_<=3",
+    "weighted_<=4",
+    "weighted_5s",
+    "weighted_6s",
+    "weighted_failed",
+    "weighted_risk",
+)
+
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -320,6 +363,11 @@ def build_parser():
         nargs="+",
         metavar="STEP",
         help="Pure Mode shortcut for --recommend with full word lists",
+    )
+    parser.add_argument(
+        "--compare-prior-weight-presets",
+        action="store_true",
+        help="compare Human Mode weighted scores across prior-weight presets",
     )
     parser.add_argument(
         "--csv",
@@ -443,6 +491,13 @@ def build_parser():
         "--no-overrides",
         action="store_true",
         help="disable built-in pattern-specific second-guess overrides",
+    )
+    parser.add_argument(
+        "--human-override",
+        nargs=3,
+        action="append",
+        metavar=("FIRST", "PATTERN", "GUESS"),
+        help="temporary Human Mode first-pattern override; may be repeated",
     )
     parser.add_argument(
         "--top",
@@ -592,6 +647,12 @@ def build_parser():
         help="how to treat prior answers while solving (default: ignore)",
     )
     parser.add_argument(
+        "--prior-weight-preset",
+        choices=tuple(PRIOR_WEIGHT_PRESETS),
+        default="current",
+        help="dated prior-answer weight schedule for Human Mode (default: current)",
+    )
+    parser.add_argument(
         "--as-of-date",
         metavar="YYYY-MM-DD",
         help="date to use for dated prior-answer weighting",
@@ -616,6 +677,12 @@ def build_parser():
         "--show-weighted-score",
         action="store_true",
         help="show weighted human-mode score for strategy runs",
+    )
+    parser.add_argument(
+        "--precision",
+        type=int,
+        metavar="N",
+        help="decimal places to use for report averages",
     )
     return parser
 
@@ -647,10 +714,10 @@ def main(argv=None):
         args.compare or args.compare_openers_with_strategy or args.top_openers
         or args.second_guess_map or args.build_second_map or args.strategy
         or args.compare_strategies or args.tune_pattern or args.tune_branch
-        or args.tune_path or args.recommend
+        or args.tune_path or args.recommend or args.compare_prior_weight_presets
     ):
         raise SystemExit(
-            "--csv can only be used with --compare, --compare-openers-with-strategy, --top-openers, --second-guess-map, --build-second-map, --strategy, --compare-strategies, --tune-pattern, --tune-branch, or --tune-path"
+            "--csv can only be used with --compare, --compare-openers-with-strategy, --top-openers, --second-guess-map, --build-second-map, --strategy, --compare-strategies, --tune-pattern, --tune-branch, --tune-path, or --compare-prior-weight-presets"
         )
     if args.compare_openers_with_strategy and not args.strategy:
         raise SystemExit("--compare-openers-with-strategy requires --strategy")
@@ -722,6 +789,8 @@ def main(argv=None):
         raise SystemExit("--min-candidates must be at least 1")
     if args.max_second_guesses is not None and args.max_second_guesses < 1:
         raise SystemExit("--max-second-guesses must be at least 1")
+    if args.precision is not None and args.precision < 0:
+        raise SystemExit("--precision must be at least 0")
 
     if args.clean_prior_source:
         try:
@@ -761,7 +830,41 @@ def main(argv=None):
     prior_answer_weights = build_prior_answer_weights(
         dated_prior_answers,
         as_of_date,
+        preset=args.prior_weight_preset,
     )
+    try:
+        temporary_human_overrides = parse_human_overrides(args.human_override)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.compare_prior_weight_presets:
+        if args.prior_policy != "downweight":
+            parser.error("--compare-prior-weight-presets requires --prior-policy downweight")
+        if not dated_prior_answers:
+            parser.error("--compare-prior-weight-presets requires dated prior answers")
+        rows = build_prior_weight_preset_comparison_rows(
+            allowed_guesses,
+            possible_answers,
+            dated_prior_answers,
+            as_of_date,
+            strategy=args.strategy or "second-map-bucket",
+            first_guess=args.first.lower(),
+            second_guess_pool_name=args.second_guess_pool,
+            trap_threshold=args.trap_threshold,
+            answer_weighting=args.answer_weighting,
+            small_candidate_order=args.small_candidate_order,
+            endgame_threshold=args.endgame_threshold,
+            max_expected_guesses=args.max_expected_guesses,
+            max_expected_states=args.max_expected_states,
+            expected_depth=args.expected_depth,
+            final_cluster_overrides=args.final_cluster_overrides,
+            use_overrides=False if args.no_overrides else None,
+            precision=4 if args.precision is None else args.precision,
+            temporary_human_overrides=temporary_human_overrides,
+        )
+        print_prior_weight_preset_comparison(rows)
+        if args.csv:
+            write_prior_weight_preset_comparison_csv(args.csv, rows)
+        return
     if args.tune_pattern_objective == "weighted-risk":
         if args.prior_policy != "downweight":
             parser.error("--tune-pattern-objective weighted-risk requires --prior-policy downweight")
@@ -769,7 +872,11 @@ def main(argv=None):
             parser.error("--tune-pattern-objective weighted-risk requires dated prior answers")
 
     if args.prior_weight_stats:
-        print_prior_weight_stats_report(possible_answers, prior_answer_weights)
+        print_prior_weight_stats_report(
+            possible_answers,
+            prior_answer_weights,
+            preset=args.prior_weight_preset,
+        )
         return
 
     if args.recommend:
@@ -785,6 +892,7 @@ def main(argv=None):
                 strategy=args.strategy or "second-map-bucket",
                 use_overrides=False if args.no_overrides else None,
                 recommend_top=args.recommend_top,
+                temporary_human_overrides=temporary_human_overrides,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -811,6 +919,7 @@ def main(argv=None):
                 prior_answers=prior_answers,
                 prior_policy=args.prior_policy,
                 prior_answer_weights=prior_answer_weights,
+                temporary_human_overrides=temporary_human_overrides,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -829,6 +938,7 @@ def main(argv=None):
             prior_answers=prior_answers,
             prior_policy=args.prior_policy,
             prior_answer_weights=prior_answer_weights,
+            temporary_human_overrides=temporary_human_overrides,
         )
         print_strategy_report(rows)
         if args.csv:
@@ -888,6 +998,7 @@ def main(argv=None):
                     args.show_weighted_score
                     or args.tune_pattern_objective == "weighted-risk"
                 ),
+                precision=4 if args.precision is None else args.precision,
                 max_second_guesses=args.max_second_guesses,
                 second_guess_candidates=args.second_guess_candidates,
                 show_progress=True,
@@ -1010,6 +1121,7 @@ def main(argv=None):
                     if args.show_small_candidate_events
                     else None
                 ),
+                temporary_human_overrides=temporary_human_overrides,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -1021,6 +1133,7 @@ def main(argv=None):
             print_weighted_score_report(
                 build_weighted_score_row(games, prior_answer_weights),
                 enabled=args.prior_policy == "downweight",
+                precision=4 if args.precision is None else args.precision,
             )
         if args.show_weighting_changes:
             print_weighting_changes(weighting_changes, enabled=args.answer_weighting == "simple")
@@ -1054,6 +1167,7 @@ def main(argv=None):
                     games,
                     prior_answer_weights,
                     args.weighted_worst_patterns,
+                    precision=4 if args.precision is None else args.precision,
                 ),
                 enabled=args.prior_policy == "downweight",
             )
@@ -1257,26 +1371,33 @@ def resolve_as_of_date(as_of_date_text, dated_prior_answers):
     return date.today()
 
 
-def prior_answer_weight_for_age(days_since_use):
+def prior_answer_weight_for_age(days_since_use, preset="current"):
+    schedule = PRIOR_WEIGHT_PRESETS[preset]
     if days_since_use <= 90:
-        return 0.05
+        return schedule["0-90"]
     if days_since_use <= 365:
-        return 0.15
+        return schedule["91-365"]
     if days_since_use <= 730:
-        return 0.35
-    return 0.60
+        return schedule["366-730"]
+    return schedule["730+"]
 
 
-def build_prior_answer_weights(dated_prior_answers, as_of_date, fallback_prior_answers=()):
+def build_prior_answer_weights(
+    dated_prior_answers,
+    as_of_date,
+    fallback_prior_answers=(),
+    preset="current",
+):
+    schedule = PRIOR_WEIGHT_PRESETS[preset]
     latest_dates_by_word = {}
     for answer_date, word in dated_prior_answers:
         if word not in latest_dates_by_word or answer_date > latest_dates_by_word[word]:
             latest_dates_by_word[word] = answer_date
 
-    weights = {word: 0.60 for word in fallback_prior_answers}
+    weights = {word: schedule["730+"] for word in fallback_prior_answers}
     for word, answer_date in latest_dates_by_word.items():
         days_since_use = max(0, (as_of_date - answer_date).days)
-        weights[word] = prior_answer_weight_for_age(days_since_use)
+        weights[word] = prior_answer_weight_for_age(days_since_use, preset=preset)
     return weights
 
 
@@ -1284,25 +1405,27 @@ def prior_weight_for_word(word, prior_answer_weights):
     return prior_answer_weights.get(word, 1.0)
 
 
-def prior_weight_bucket_label(weight):
+def prior_weight_bucket_label(weight, preset="current"):
+    schedule = PRIOR_WEIGHT_PRESETS[preset]
     if weight == 1.0:
         return "never used"
-    if weight == 0.05:
+    if weight == schedule["0-90"]:
         return "used within last 90 days"
-    if weight == 0.15:
+    if weight == schedule["91-365"]:
         return "used 91-365 days ago"
-    if weight == 0.35:
+    if weight == schedule["366-730"]:
         return "used 366-730 days ago"
-    if weight == 0.60:
+    if weight == schedule["730+"]:
         return "used more than 730 days ago"
     return "other"
 
 
-def build_prior_weight_stats(possible_answers, prior_answer_weights):
+def build_prior_weight_stats(possible_answers, prior_answer_weights, preset="current"):
+    schedule = PRIOR_WEIGHT_PRESETS[preset]
     buckets = Counter()
     for answer in possible_answers:
         weight = prior_weight_for_word(answer, prior_answer_weights)
-        buckets[(weight, prior_weight_bucket_label(weight))] += 1
+        buckets[(weight, prior_weight_bucket_label(weight, preset=preset))] += 1
     return tuple(
         {
             "weight": f"{weight:.2f}",
@@ -1310,19 +1433,20 @@ def build_prior_weight_stats(possible_answers, prior_answer_weights):
             "count": buckets[(weight, label)],
         }
         for weight, label in (
-            (1.0, "never used"),
-            (0.05, "used within last 90 days"),
-            (0.15, "used 91-365 days ago"),
-            (0.35, "used 366-730 days ago"),
-            (0.60, "used more than 730 days ago"),
+            (schedule["never"], "never used"),
+            (schedule["0-90"], "used within last 90 days"),
+            (schedule["91-365"], "used 91-365 days ago"),
+            (schedule["366-730"], "used 366-730 days ago"),
+            (schedule["730+"], "used more than 730 days ago"),
         )
     )
 
 
-def print_prior_weight_stats_report(possible_answers, prior_answer_weights):
+def print_prior_weight_stats_report(possible_answers, prior_answer_weights, preset="current"):
     print("Prior weight stats:")
+    print(f"Preset: {preset}")
     print("weight  bucket                    count")
-    for row in build_prior_weight_stats(possible_answers, prior_answer_weights):
+    for row in build_prior_weight_stats(possible_answers, prior_answer_weights, preset=preset):
         print(f"{row['weight']:<7} {row['bucket']:<25} {row['count']}")
 
 
@@ -1400,6 +1524,7 @@ def build_recommendation(
     strategy="second-map-bucket",
     use_overrides=None,
     recommend_top=5,
+    temporary_human_overrides=None,
 ):
     path_guesses, path_patterns = parse_tune_path(state_steps, allowed_guesses)
     candidates = filter_candidates_for_path(possible_answers, path_guesses, path_patterns)
@@ -1418,6 +1543,7 @@ def build_recommendation(
         use_overrides,
         prior_policy,
         prior_answer_weights,
+        temporary_human_overrides,
     )
     if recommendation is not None:
         override_mode = (
@@ -1577,11 +1703,21 @@ def find_recommendation_first_pattern_override(
     use_overrides,
     prior_policy,
     prior_answer_weights,
+    temporary_human_overrides=None,
 ):
     if len(path_guesses) != 1 or len(path_patterns) != 1:
         return None
     first_guess = path_guesses[0]
-    if not (first_guess == "slate" and tuned_overrides_enabled(strategy, use_overrides)):
+    if not (
+        (
+            first_guess == "slate"
+            or has_temporary_human_override_for_first(
+                first_guess,
+                temporary_human_overrides,
+            )
+        )
+        and tuned_overrides_enabled(strategy, use_overrides)
+    ):
         return None
     pattern = path_patterns[0]
     second_guess_by_pattern = {pattern: ""}
@@ -1592,6 +1728,7 @@ def find_recommendation_first_pattern_override(
         second_guess_by_pattern,
         prior_policy=prior_policy,
         prior_answer_weights=prior_answer_weights,
+        temporary_human_overrides=temporary_human_overrides,
     )
     return second_guess_by_pattern.get(pattern) or None
 
@@ -1689,13 +1826,13 @@ def print_expected_diagnostics(row, elapsed_seconds):
     print(f"Elapsed seconds: {elapsed_seconds:.2f}")
 
 
-def print_weighted_score_report(row, enabled=True):
+def print_weighted_score_report(row, enabled=True, precision=4):
     if not enabled:
         print("Weighted human-mode score: disabled")
         return
     print("Weighted human-mode score:")
     print(f"Total weight: {row['total_weight']:.2f}")
-    print(f"Weighted average guesses: {row['weighted_average']:.2f}")
+    print(f"Weighted average guesses: {row['weighted_average']:.{precision}f}")
     print(f"Weighted <=3: {row['weighted_solved_3_or_less']:.2f}")
     print(f"Weighted <=4: {row['weighted_solved_4_or_less']:.2f}")
     print(f"Weighted 5s: {row['weighted_fives']:.2f}")
@@ -1718,6 +1855,7 @@ def build_tune_pattern_rows(
     objective="risk",
     prior_answer_weights=None,
     include_weighted_columns=False,
+    precision=4,
     max_second_guesses=None,
     second_guess_candidates="all",
     show_progress=False,
@@ -1738,6 +1876,7 @@ def build_tune_pattern_rows(
         objective=objective,
         prior_answer_weights=prior_answer_weights,
         include_weighted_columns=include_weighted_columns,
+        precision=precision,
         max_second_guesses=max_second_guesses,
         second_guess_candidates=second_guess_candidates,
         show_progress=show_progress,
@@ -1762,6 +1901,7 @@ def build_tune_pattern_result(
     objective="risk",
     prior_answer_weights=None,
     include_weighted_columns=False,
+    precision=4,
     max_second_guesses=None,
     second_guess_candidates="all",
     show_progress=False,
@@ -1836,6 +1976,7 @@ def build_tune_pattern_result(
                 include_weighted_columns=(
                     include_weighted_columns or objective == "weighted-risk"
                 ),
+                precision=precision,
             )
             rows.append(row)
             rank = tune_pattern_objective_rank(row, objective)
@@ -1930,6 +2071,7 @@ def build_full_second_map_rows(
     answer_weighting="off",
     small_candidate_order="normal",
     objective="risk",
+    precision=4,
 ):
     validate_tune_pattern(first_guess, "." * len(first_guess), strategy, allowed_guesses)
     return tuple(
@@ -1944,6 +2086,7 @@ def build_full_second_map_rows(
             answer_weighting,
             small_candidate_order,
             objective,
+            precision=precision,
         )
         for pattern, _candidates in first_pattern_candidate_groups(
             first_guess,
@@ -2027,6 +2170,7 @@ def run_build_second_map(
                 max_second_guesses=max_second_guesses,
                 second_guess_candidates=second_guess_candidates,
                 show_progress=True,
+                precision=4,
             )
             rows.append(row)
             if writer is not None:
@@ -2114,6 +2258,7 @@ def build_second_map_row_for_pattern(
     max_second_guesses=None,
     second_guess_candidates="all",
     show_progress=False,
+    precision=4,
 ):
     candidates = tuple(
         answer for answer in possible_answers if score_guess(first_guess, answer) == pattern
@@ -2156,6 +2301,7 @@ def build_second_map_row_for_pattern(
             games,
             candidates,
             branch_summary=True,
+            precision=precision,
         )
         rank = tune_pattern_objective_rank(row, objective)
         if best_rank is None or rank < best_rank:
@@ -2283,6 +2429,28 @@ def validate_tune_pattern(first_guess, pattern, strategy, allowed_guesses):
         raise ValueError(f"Unsupported strategy: {strategy}")
 
 
+def parse_human_overrides(raw_overrides):
+    overrides = {}
+    for first_guess, pattern, guess in raw_overrides or ():
+        first_guess = first_guess.lower()
+        guess = guess.lower()
+        if len(first_guess) != 5 or not first_guess.isalpha():
+            raise ValueError(f"Invalid human override first guess: {first_guess!r}")
+        if len(pattern) != 5 or any(mark not in "GY." for mark in pattern):
+            raise ValueError(f"Invalid human override pattern: {pattern!r}")
+        if len(guess) != 5 or not guess.isalpha():
+            raise ValueError(f"Invalid human override guess: {guess!r}")
+        overrides[(first_guess, pattern)] = guess
+    return overrides
+
+
+def has_temporary_human_override_for_first(first_guess, temporary_human_overrides=None):
+    return any(
+        override_first == first_guess
+        for override_first, _pattern in (temporary_human_overrides or {})
+    )
+
+
 def apply_second_guess_overrides(
     first_guess,
     second_guess_pool_name,
@@ -2290,6 +2458,7 @@ def apply_second_guess_overrides(
     second_guess_by_pattern,
     prior_policy="ignore",
     prior_answer_weights=None,
+    temporary_human_overrides=None,
 ):
     pool = set(second_guess_pool)
     for (override_first, pattern, override_pool), override_guess in SECOND_GUESS_OVERRIDES.items():
@@ -2322,6 +2491,18 @@ def apply_second_guess_overrides(
                 raise ValueError(
                     f"Human Mode override {override_guess!r} for {first_guess!r} {pattern!r} "
                     f"is not in the {second_guess_pool_name} second-guess pool."
+                )
+            second_guess_by_pattern[pattern] = override_guess
+        for (override_first, pattern), override_guess in (temporary_human_overrides or {}).items():
+            if override_first != first_guess:
+                continue
+            if pattern not in second_guess_by_pattern:
+                continue
+            if override_guess not in pool:
+                raise ValueError(
+                    f"Temporary Human Mode override {override_guess!r} for "
+                    f"{first_guess!r} {pattern!r} is not in the "
+                    f"{second_guess_pool_name} second-guess pool."
                 )
             second_guess_by_pattern[pattern] = override_guess
 
@@ -2449,6 +2630,7 @@ def build_tune_pattern_row(
     branch_summary=False,
     prior_answer_weights=None,
     include_weighted_columns=False,
+    precision=4,
 ):
     summary = build_summary_row_from_games(second_guess, games)
     row = {
@@ -2464,13 +2646,17 @@ def build_tune_pattern_row(
         "risk_score": summary["risk_score"],
     }
     if include_weighted_columns:
-        row.update(build_tune_pattern_weighted_metrics(games, prior_answer_weights))
+        row.update(build_tune_pattern_weighted_metrics(
+            games,
+            prior_answer_weights,
+            precision=precision,
+        ))
     if branch_summary:
         row.update(build_second_feedback_branch_summary(second_guess, candidates, games))
     return row
 
 
-def build_tune_pattern_weighted_metrics(games, prior_answer_weights=None):
+def build_tune_pattern_weighted_metrics(games, prior_answer_weights=None, precision=4):
     weighted = build_weighted_score_row(games, prior_answer_weights or {})
     weighted_risk = (
         weighted["weighted_fives"] * 2
@@ -2478,7 +2664,7 @@ def build_tune_pattern_weighted_metrics(games, prior_answer_weights=None):
         + weighted["weighted_failed"] * 20
     )
     return {
-        "weighted_avg": f"{weighted['weighted_average']:.2f}",
+        "weighted_avg": f"{weighted['weighted_average']:.{precision}f}",
         "weighted_5s": f"{weighted['weighted_fives']:.2f}",
         "weighted_6s": f"{weighted['weighted_sixes']:.2f}",
         "weighted_risk": f"{weighted_risk:.2f}",
@@ -3114,6 +3300,7 @@ def build_strategy_comparison_rows(
     prior_answers=(),
     prior_policy="ignore",
     prior_answer_weights=None,
+    temporary_human_overrides=None,
 ):
     strategy_specs = (
         ("baseline", "", 2),
@@ -3146,6 +3333,7 @@ def build_strategy_comparison_rows(
             prior_answers=prior_answers,
             prior_policy=prior_policy,
             prior_answer_weights=prior_answer_weights,
+            temporary_human_overrides=temporary_human_overrides,
         )
         if strategy == "baseline":
             row = {**row, "second_guess_pool": "-"}
@@ -3171,12 +3359,19 @@ def build_opener_strategy_comparison_rows(
     prior_answers=(),
     prior_policy="ignore",
     prior_answer_weights=None,
+    temporary_human_overrides=None,
 ):
     rows = []
     for first_guess in first_guesses:
         first_guess = first_guess.lower()
         opener_use_overrides = use_overrides
-        if first_guess != "slate":
+        if (
+            first_guess != "slate"
+            and not has_temporary_human_override_for_first(
+                first_guess,
+                temporary_human_overrides,
+            )
+        ):
             opener_use_overrides = False
         row = build_strategy_row(
             strategy,
@@ -3196,6 +3391,7 @@ def build_opener_strategy_comparison_rows(
             prior_answers=prior_answers,
             prior_policy=prior_policy,
             prior_answer_weights=prior_answer_weights,
+            temporary_human_overrides=temporary_human_overrides,
         )
         rows.append(format_opener_strategy_row(row))
     return tuple(rows)
@@ -3236,6 +3432,7 @@ def build_strategy_row(
     prior_answers=(),
     prior_policy="ignore",
     prior_answer_weights=None,
+    temporary_human_overrides=None,
 ):
     row, _games = build_strategy_result(
         strategy,
@@ -3255,6 +3452,7 @@ def build_strategy_row(
         prior_answers=prior_answers,
         prior_policy=prior_policy,
         prior_answer_weights=prior_answer_weights,
+        temporary_human_overrides=temporary_human_overrides,
     )
     return row
 
@@ -3283,6 +3481,7 @@ def build_strategy_result(
     prior_answer_weights=None,
     prior_weighting_changes=None,
     small_candidate_events=None,
+    temporary_human_overrides=None,
 ):
     if first_guess not in allowed_guesses:
         raise ValueError(f"First guess {first_guess!r} is not in the allowed guess list.")
@@ -3344,7 +3543,13 @@ def build_strategy_result(
         "second-map-hybrid",
     }:
         effective_use_overrides = (
-            first_guess == "slate"
+            (
+                first_guess == "slate"
+                or has_temporary_human_override_for_first(
+                    first_guess,
+                    temporary_human_overrides,
+                )
+            )
             and tuned_overrides_enabled(strategy, use_overrides)
         )
         second_guess_pool = (
@@ -3379,6 +3584,7 @@ def build_strategy_result(
                     second_guess_by_pattern,
                     prior_policy=prior_policy,
                     prior_answer_weights=prior_answer_weights,
+                    temporary_human_overrides=temporary_human_overrides,
                 )
         expected_optimizer = None
         if strategy == "second-map-expected":
@@ -4436,6 +4642,89 @@ def build_weighted_score_row(games, prior_answer_weights):
     }
 
 
+def build_prior_weight_preset_comparison_rows(
+    allowed_guesses,
+    possible_answers,
+    dated_prior_answers,
+    as_of_date,
+    strategy,
+    first_guess,
+    second_guess_pool_name,
+    trap_threshold=2,
+    answer_weighting="off",
+    small_candidate_order="normal",
+    endgame_threshold=10,
+    max_expected_guesses=10,
+    max_expected_states=50000,
+    expected_depth=2,
+    final_cluster_overrides="off",
+    use_overrides=None,
+    precision=4,
+    temporary_human_overrides=None,
+):
+    rows = []
+    for preset in PRIOR_WEIGHT_PRESETS:
+        prior_answer_weights = build_prior_answer_weights(
+            dated_prior_answers,
+            as_of_date,
+            preset=preset,
+        )
+        _summary_row, games = build_strategy_result(
+            strategy,
+            first_guess,
+            allowed_guesses,
+            possible_answers,
+            second_guess_pool_name=second_guess_pool_name,
+            trap_threshold=trap_threshold,
+            endgame_threshold=endgame_threshold,
+            max_expected_guesses=max_expected_guesses,
+            max_expected_states=max_expected_states,
+            expected_depth=expected_depth,
+            use_overrides=use_overrides,
+            answer_weighting=answer_weighting,
+            small_candidate_order=small_candidate_order,
+            final_cluster_overrides=final_cluster_overrides,
+            prior_policy="downweight",
+            prior_answer_weights=prior_answer_weights,
+            temporary_human_overrides=temporary_human_overrides,
+        )
+        weighted = build_weighted_score_row(games, prior_answer_weights)
+        weighted_risk = (
+            weighted["weighted_fives"] * 2
+            + weighted["weighted_sixes"] * 5
+            + weighted["weighted_failed"] * 20
+        )
+        rows.append({
+            "preset": preset,
+            "total_weight": f"{weighted['total_weight']:.2f}",
+            "weighted_average": f"{weighted['weighted_average']:.{precision}f}",
+            "weighted_<=3": f"{weighted['weighted_solved_3_or_less']:.2f}",
+            "weighted_<=4": f"{weighted['weighted_solved_4_or_less']:.2f}",
+            "weighted_5s": f"{weighted['weighted_fives']:.2f}",
+            "weighted_6s": f"{weighted['weighted_sixes']:.2f}",
+            "weighted_failed": f"{weighted['weighted_failed']:.2f}",
+            "weighted_risk": f"{weighted_risk:.2f}",
+        })
+    return tuple(rows)
+
+
+def print_prior_weight_preset_comparison(rows):
+    print("Prior weight preset comparison:")
+    print("preset           total_weight  weighted_average  weighted_<=3  weighted_<=4  weighted_5s  weighted_6s  weighted_failed  weighted_risk")
+    for row in rows:
+        print(
+            f"{row['preset']:<16} "
+            f"{row['total_weight']:<13} "
+            f"{row['weighted_average']:<17} "
+            f"{row['weighted_<=3']:<13} "
+            f"{row['weighted_<=4']:<13} "
+            f"{row['weighted_5s']:<12} "
+            f"{row['weighted_6s']:<12} "
+            f"{row['weighted_failed']:<16} "
+            f"{row['weighted_risk']}"
+        )
+
+
 def build_worst_game_rows(games, limit, possible_answers=None):
     solved_games = [game for game in games if game.solved]
     worst_games = sorted(
@@ -4465,7 +4754,7 @@ def build_worst_pattern_rows(games, limit=None):
     return tuple(ranked_rows[:limit])
 
 
-def build_weighted_worst_pattern_rows(games, prior_answer_weights, limit):
+def build_weighted_worst_pattern_rows(games, prior_answer_weights, limit, precision=4):
     grouped_games = defaultdict(list)
     for game in games:
         if not game.guesses:
@@ -4474,7 +4763,12 @@ def build_weighted_worst_pattern_rows(games, prior_answer_weights, limit):
         grouped_games[pattern].append(game)
 
     rows = tuple(
-        format_weighted_worst_pattern_row(pattern, group, prior_answer_weights)
+        format_weighted_worst_pattern_row(
+            pattern,
+            group,
+            prior_answer_weights,
+            precision=precision,
+        )
         for pattern, group in grouped_games.items()
     )
     ranked_rows = sorted(
@@ -4596,7 +4890,7 @@ def format_worst_pattern_row(pattern, games):
     }
 
 
-def format_weighted_worst_pattern_row(pattern, games, prior_answer_weights):
+def format_weighted_worst_pattern_row(pattern, games, prior_answer_weights, precision=4):
     total_weight = 0.0
     weighted_guess_sum = 0.0
     weighted_fives = 0.0
@@ -4622,7 +4916,7 @@ def format_weighted_worst_pattern_row(pattern, games, prior_answer_weights):
         "pattern": pattern,
         "games": len(games),
         "total_weight": f"{total_weight:.2f}",
-        "weighted_avg": f"{weighted_average:.2f}",
+        "weighted_avg": f"{weighted_average:.{precision}f}",
         "weighted_5s": f"{weighted_fives:.2f}",
         "weighted_6s": f"{weighted_sixes:.2f}",
         "weighted_risk": f"{weighted_risk:.2f}",
@@ -5299,6 +5593,20 @@ def write_worst_games_csv(path, rows):
 
     with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=WORST_GAME_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_prior_weight_preset_comparison_csv(path, rows):
+    csv_path = Path(path)
+    if csv_path.parent != Path("."):
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames=PRIOR_WEIGHT_PRESET_COMPARISON_COLUMNS,
+        )
         writer.writeheader()
         writer.writerows(rows)
 

@@ -111,6 +111,15 @@ slate ..YY. -> hound
 slate ..Y.Y -> began
 ```
 
+To test a temporary Human Mode override without hardcoding it, add `--human-override FIRST PATTERN GUESS`. It may be repeated, applies only when `--prior-policy downweight` and dated priors are active, and is disabled by `--no-overrides`:
+
+```bash
+python -m src.wordle_lab \
+  --human-recommend slate ..... \
+  --prior-weight-preset aggressive \
+  --human-override slate ..... comfy
+```
+
 Pure Mode keeps its own pure overrides, for example:
 
 ```text

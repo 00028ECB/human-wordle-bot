@@ -18,6 +18,7 @@ from src.wordle_lab.__main__ import (
     TUNE_PATH_COLUMNS,
     TUNE_PATH_BRANCH_COLUMNS,
     WORST_GAME_COLUMNS,
+    PRIOR_WEIGHT_PRESETS,
     apply_second_guess_overrides,
     answer_likelihood_score,
     apply_prior_policy_to_candidates,
@@ -26,6 +27,7 @@ from src.wordle_lab.__main__ import (
     build_comparison_row,
     build_prior_dated_stats,
     build_prior_answer_weights,
+    build_prior_weight_preset_comparison_rows,
     build_prior_weight_stats,
     build_recommendation,
     build_weighted_score_row,
@@ -76,6 +78,7 @@ from src.wordle_lab.__main__ import (
     load_built_second_map,
     open_incremental_built_second_map_csv,
     main,
+    parse_human_overrides,
     play_baseline_game,
     play_second_map_game,
     print_built_second_map,
@@ -86,6 +89,7 @@ from src.wordle_lab.__main__ import (
     print_prior_stats_report,
     print_prior_dated_stats_report,
     print_prior_weight_stats_report,
+    print_prior_weight_preset_comparison,
     print_prior_weighting_changes,
     print_recommendation,
     print_weighted_score_report,
@@ -116,6 +120,7 @@ from src.wordle_lab.__main__ import (
     write_tune_branch_csv,
     write_tune_path_csv,
     write_tune_pattern_csv,
+    write_prior_weight_preset_comparison_csv,
 )
 from src.wordle_lab.scoring import score_guess
 from src.wordle_lab.simulator import GameResult, run_simulation
@@ -209,6 +214,44 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.as_of_date, "2025-09-01")
         self.assertTrue(args.show_prior_weighting_changes)
         self.assertTrue(args.prior_weight_stats)
+
+    def test_parser_accepts_prior_weight_preset(self):
+        args = build_parser().parse_args(
+            [
+                "--strategy",
+                "baseline",
+                "--prior-weight-preset",
+                "conservative",
+            ]
+        )
+
+        self.assertEqual(args.prior_weight_preset, "conservative")
+
+    def test_parser_accepts_repeated_human_overrides(self):
+        args = build_parser().parse_args(
+            [
+                "--strategy",
+                "second-map-bucket",
+                "--human-override",
+                "slate",
+                ".....",
+                "comfy",
+                "--human-override",
+                "slate",
+                "....Y",
+                "drown",
+            ]
+        )
+
+        self.assertEqual(
+            args.human_override,
+            [["slate", ".....", "comfy"], ["slate", "....Y", "drown"]],
+        )
+
+    def test_parser_accepts_compare_prior_weight_presets(self):
+        args = build_parser().parse_args(["--compare-prior-weight-presets"])
+
+        self.assertTrue(args.compare_prior_weight_presets)
 
     def test_parser_accepts_show_weighted_score(self):
         args = build_parser().parse_args(["--strategy", "baseline", "--show-weighted-score"])
@@ -842,6 +885,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(prior_answer_weight_for_age(730), 0.35)
         self.assertEqual(prior_answer_weight_for_age(731), 0.60)
 
+    def test_prior_answer_weight_for_age_uses_named_presets(self):
+        self.assertEqual(prior_answer_weight_for_age(90, preset="conservative"), 0.10)
+        self.assertEqual(prior_answer_weight_for_age(365, preset="aggressive"), 0.10)
+        self.assertEqual(prior_answer_weight_for_age(730, preset="repeat-friendly"), 0.60)
+        self.assertEqual(PRIOR_WEIGHT_PRESETS["current"]["never"], 1.0)
+
     def test_build_prior_answer_weights_uses_most_recent_date(self):
         dated_rows = (
             (date(2024, 1, 1), "cigar"),
@@ -860,6 +909,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(weights["raise"], 0.60)
         self.assertEqual(prior_weight_for_word("slate", weights), 1.0)
 
+    def test_build_prior_answer_weights_uses_selected_preset(self):
+        weights = build_prior_answer_weights(
+            ((date(2025, 9, 1), "cigar"), (date(2024, 8, 31), "petal")),
+            date(2025, 9, 1),
+            fallback_prior_answers=("raise",),
+            preset="conservative",
+        )
+
+        self.assertEqual(weights["cigar"], 0.10)
+        self.assertEqual(weights["petal"], 0.50)
+        self.assertEqual(weights["raise"], 0.75)
+
     def test_build_prior_weight_stats_counts_answer_buckets(self):
         weights = {"cigar": 0.05, "petal": 0.60}
 
@@ -869,6 +930,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(counts["1.00"], 1)
         self.assertEqual(counts["0.05"], 1)
         self.assertEqual(counts["0.60"], 1)
+
+    def test_build_prior_weight_stats_uses_selected_preset(self):
+        rows = build_prior_weight_stats(
+            ("cigar", "petal", "slate"),
+            {"cigar": 0.10, "petal": 0.75},
+            preset="conservative",
+        )
+        counts = {row["weight"]: row["count"] for row in rows}
+
+        self.assertEqual(counts["1.00"], 1)
+        self.assertEqual(counts["0.10"], 1)
+        self.assertEqual(counts["0.75"], 1)
 
     def test_print_prior_weight_stats_report_outputs_table(self):
         output = io.StringIO()
@@ -921,7 +994,133 @@ class CliTests(unittest.TestCase):
         report = output.getvalue()
         self.assertIn("Weighted human-mode score:", report)
         self.assertIn("Total weight: 1.65", report)
-        self.assertIn("Weighted average guesses: 2.97", report)
+        self.assertIn("Weighted average guesses: 2.9700", report)
+
+    def test_print_weighted_score_report_accepts_precision(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_weighted_score_report(
+                {
+                    "total_weight": 1.65,
+                    "weighted_average": 2.97123,
+                    "weighted_solved_3_or_less": 0.65,
+                    "weighted_solved_4_or_less": 0.65,
+                    "weighted_fives": 0.0,
+                    "weighted_sixes": 0.0,
+                    "weighted_failed": 1.0,
+                },
+                precision=3,
+            )
+
+        report = output.getvalue()
+        self.assertIn("Weighted average guesses: 2.971", report)
+
+    def test_build_prior_weight_preset_comparison_rows_compares_all_presets(self):
+        rows = build_prior_weight_preset_comparison_rows(
+            ("cigar", "rebut", "sissy"),
+            ("cigar", "rebut", "sissy"),
+            ((date(2026, 5, 28), "cigar"), (date(2025, 4, 24), "rebut")),
+            date(2026, 5, 28),
+            strategy="second-map-bucket",
+            first_guess="cigar",
+            second_guess_pool_name="answers",
+        )
+        rows_by_preset = {row["preset"]: row for row in rows}
+
+        self.assertEqual(tuple(rows_by_preset), tuple(PRIOR_WEIGHT_PRESETS))
+        self.assertEqual(rows_by_preset["current"]["total_weight"], "1.40")
+        self.assertEqual(rows_by_preset["conservative"]["total_weight"], "1.60")
+        self.assertRegex(rows_by_preset["current"]["weighted_average"], r"^\d+\.\d{4}$")
+        self.assertIn("weighted_risk", rows_by_preset["aggressive"])
+        self.assertIn("weighted_<=3", rows_by_preset["repeat-friendly"])
+
+    def test_build_prior_weight_preset_comparison_rows_accepts_precision(self):
+        rows = build_prior_weight_preset_comparison_rows(
+            ("cigar", "rebut", "sissy"),
+            ("cigar", "rebut", "sissy"),
+            ((date(2026, 5, 28), "cigar"),),
+            date(2026, 5, 28),
+            strategy="second-map-bucket",
+            first_guess="cigar",
+            second_guess_pool_name="answers",
+            precision=3,
+        )
+
+        self.assertRegex(rows[0]["weighted_average"], r"^\d+\.\d{3}$")
+
+    def test_print_prior_weight_preset_comparison_outputs_table(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_prior_weight_preset_comparison(
+                (
+                    {
+                        "preset": "current",
+                        "total_weight": "1.40",
+                        "weighted_average": "2.0000",
+                        "weighted_<=3": "1.40",
+                        "weighted_<=4": "1.40",
+                        "weighted_5s": "0.00",
+                        "weighted_6s": "0.00",
+                        "weighted_failed": "0.00",
+                        "weighted_risk": "0.00",
+                    },
+                )
+            )
+
+        report = output.getvalue()
+        self.assertIn("Prior weight preset comparison:", report)
+        self.assertIn("weighted_average", report)
+        self.assertIn("current", report)
+
+    def test_main_compares_prior_weight_presets_for_custom_word_lists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_path = temp_path / "prior.txt"
+            dated_path = temp_path / "prior_dated.csv"
+            csv_path = temp_path / "results" / "preset_compare.csv"
+            answers_path.write_text("cigar\nrebut\nsissy\n", encoding="utf-8")
+            allowed_path.write_text("cigar\nrebut\nsissy\n", encoding="utf-8")
+            prior_path.write_text("", encoding="utf-8")
+            dated_path.write_text(
+                "date,word\n2026-05-28,cigar\n2025-04-24,rebut\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main([
+                    "--compare-prior-weight-presets",
+                    "--answers",
+                    str(answers_path),
+                    "--allowed",
+                    str(allowed_path),
+                    "--prior-answers",
+                    str(prior_path),
+                    "--prior-answers-dated",
+                    str(dated_path),
+                    "--prior-policy",
+                    "downweight",
+                    "--strategy",
+                    "second-map-bucket",
+                    "--first",
+                    "cigar",
+                    "--second-guess-pool",
+                    "answers",
+                    "--as-of-date",
+                    "2026-05-28",
+                    "--csv",
+                    str(csv_path),
+                ])
+
+            report = output.getvalue()
+            csv_text = csv_path.read_text(encoding="utf-8")
+            self.assertIn("Prior weight preset comparison:", report)
+            self.assertIn("repeat-friendly", report)
+            self.assertIn("weighted_<=3", csv_text)
 
     def test_print_prior_dated_stats_report_outputs_counts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2528,6 +2727,40 @@ class CliTests(unittest.TestCase):
         self.assertEqual(second_guess_by_pattern["..YY."], "hound")
         self.assertEqual(second_guess_by_pattern["..Y.Y"], "began")
 
+    def test_apply_second_guess_overrides_uses_temporary_human_override_last(self):
+        second_guess_by_pattern = {"....Y": "heron"}
+
+        apply_second_guess_overrides(
+            "slate",
+            "answers",
+            ("rocky", "drown", "comfy"),
+            second_guess_by_pattern,
+            prior_policy="downweight",
+            prior_answer_weights={"cigar": 0.05},
+            temporary_human_overrides={("slate", "....Y"): "comfy"},
+        )
+
+        self.assertEqual(second_guess_by_pattern["....Y"], "comfy")
+
+    def test_apply_second_guess_overrides_ignores_temporary_human_override_without_weights(self):
+        second_guess_by_pattern = {"....Y": "heron"}
+
+        apply_second_guess_overrides(
+            "slate",
+            "answers",
+            ("rocky", "comfy"),
+            second_guess_by_pattern,
+            prior_policy="downweight",
+            prior_answer_weights={},
+            temporary_human_overrides={("slate", "....Y"): "comfy"},
+        )
+
+        self.assertEqual(second_guess_by_pattern["....Y"], "rocky")
+
+    def test_parse_human_overrides_validates_pattern(self):
+        with self.assertRaises(ValueError):
+            parse_human_overrides((("slate", "abcde", "comfy"),))
+
     def test_apply_second_guess_overrides_keeps_pure_override_without_weights(self):
         second_guess_by_pattern = {
             "....Y": "heron",
@@ -2677,8 +2910,43 @@ class CliTests(unittest.TestCase):
         cider_game = next(game for game in games if game.answer == "cider")
         self.assertEqual(cider_game.guesses[1], "drown")
 
+    def test_build_strategy_result_uses_temporary_human_override(self):
+        words = (
+            "slate",
+            "cider",
+            "frond",
+            "tough",
+            "deter",
+            "rocky",
+            "brick",
+            "randy",
+            "march",
+            "pouch",
+            "rally",
+            "dilly",
+            "count",
+            "grind",
+            "missy",
+            "drown",
+            "comfy",
+        )
+
+        _row, games = build_strategy_result(
+            "second-map-bucket",
+            "slate",
+            words,
+            words,
+            second_guess_pool_name="answers",
+            prior_policy="downweight",
+            prior_answer_weights={"cider": 0.05},
+            temporary_human_overrides={("slate", "....Y"): "comfy"},
+        )
+
+        cider_game = next(game for game in games if game.answer == "cider")
+        self.assertEqual(cider_game.guesses[1], "comfy")
+
     def test_build_strategy_result_no_overrides_disables_human_mode_override(self):
-        words = ("slate", "cider", "rocky", "drown")
+        words = ("slate", "cider", "rocky", "drown", "comfy")
 
         _row, games = build_strategy_result(
             "second-map-bucket",
@@ -2689,10 +2957,12 @@ class CliTests(unittest.TestCase):
             use_overrides=False,
             prior_policy="downweight",
             prior_answer_weights={"cider": 0.05},
+            temporary_human_overrides={("slate", "....Y"): "comfy"},
         )
 
         cider_game = next(game for game in games if game.answer == "cider")
         self.assertNotEqual(cider_game.guesses[1], "drown")
+        self.assertNotEqual(cider_game.guesses[1], "comfy")
 
     def test_build_strategy_result_does_not_apply_slate_overrides_to_other_openers(self):
         allowed_words = ("trace", "frond", "pound", "cough", "pouch")
@@ -3606,6 +3876,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(rows_by_pattern["..Y.."]["total_weight"], "0.05")
         self.assertEqual(rows_by_pattern["..Y.."]["weighted_5s"], "0.05")
+        self.assertRegex(rows_by_pattern["..Y.."]["weighted_avg"], r"^\d+\.\d{4}$")
         self.assertEqual(rows_by_pattern["..Y.."]["weighted_risk"], "0.10")
         self.assertEqual(rows_by_pattern[".YYYY"]["weighted_6s"], "0.60")
         self.assertEqual(rows_by_pattern[".YYYY"]["weighted_risk"], "3.00")
@@ -3925,9 +4196,26 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertIn("weighted_avg", rows[0])
+        self.assertRegex(rows[0]["weighted_avg"], r"^\d+\.\d{4}$")
         self.assertIn("weighted_5s", rows[0])
         self.assertIn("weighted_6s", rows[0])
         self.assertIn("weighted_risk", rows[0])
+
+    def test_build_tune_pattern_rows_weighted_columns_accept_precision(self):
+        rows = build_tune_pattern_rows(
+            "slate",
+            "GGGGG",
+            "second-map-bucket",
+            ("raise", "slate", "crane", "trace"),
+            ("raise", "slate", "crane"),
+            second_guess_pool=("raise", "slate", "crane"),
+            top=1,
+            prior_answer_weights={"slate": 0.05},
+            include_weighted_columns=True,
+            precision=3,
+        )
+
+        self.assertRegex(rows[0]["weighted_avg"], r"^\d+\.\d{3}$")
 
     def test_tune_pattern_branch_safe_can_rank_without_printing_branch_columns(self):
         allowed_words = ("raise", "slate", "crane", "trace")
@@ -4534,6 +4822,20 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["alternatives"][0]["guess"], "drown")
         self.assertEqual(row["alternatives"][0]["weighted_expected_remaining"], "1.00")
         self.assertIn("max_bucket", row)
+
+    def test_build_recommendation_uses_temporary_human_override(self):
+        row = build_recommendation(
+            ("slate", "....Y"),
+            ("slate", "cider", "diner", "poker", "drown", "rocky", "comfy"),
+            ("cider", "diner", "poker", "drown", "rocky", "comfy"),
+            second_guess_pool_name="answers",
+            prior_policy="downweight",
+            prior_answer_weights={"cider": 0.05},
+            temporary_human_overrides={("slate", "....Y"): "comfy"},
+        )
+
+        self.assertEqual(row["recommended_guess"], "comfy")
+        self.assertEqual(row["explanation"], "Used Human Mode override for slate ....Y.")
 
     def test_print_recommendation_outputs_summary(self):
         output = io.StringIO()
