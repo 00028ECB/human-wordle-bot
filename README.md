@@ -144,6 +144,8 @@ python -m src.wordle_lab \
   --state slate ....Y
 ```
 
+Use `--recommend-top N` to show ranked alternatives. The first row matches the recommended next guess and each row shows whether the guess is an answer or probe, its largest feedback bucket, bucket count, expected remaining candidates, and weighted expected remaining when Human Mode downweighting is active.
+
 Human Mode recommendations use dated prior-answer weights when provided:
 
 ```bash
@@ -152,6 +154,7 @@ python -m src.wordle_lab \
   --strategy second-map-bucket \
   --second-guess-pool answers \
   --state slate ....Y drown .Y... \
+  --recommend-top 10 \
   --answers data/wordle_answers_full.txt \
   --allowed data/wordle_allowed_guesses_full.txt \
   --prior-answers-dated data/prior_answers_dated.csv \

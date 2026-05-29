@@ -326,11 +326,21 @@ class CliTests(unittest.TestCase):
 
     def test_parser_accepts_recommend_state(self):
         args = build_parser().parse_args(
-            ["--recommend", "--state", "slate", "....Y", "drown", ".Y..."]
+            [
+                "--recommend",
+                "--state",
+                "slate",
+                "....Y",
+                "drown",
+                ".Y...",
+                "--recommend-top",
+                "3",
+            ]
         )
 
         self.assertTrue(args.recommend)
         self.assertEqual(args.state, ["slate", "....Y", "drown", ".Y..."])
+        self.assertEqual(args.recommend_top, 3)
 
     def test_parser_accepts_top_for_tune_pattern(self):
         args = build_parser().parse_args(
@@ -1685,6 +1695,8 @@ class CliTests(unittest.TestCase):
                         "downweight",
                         "--as-of-date",
                         "2025-09-01",
+                        "--recommend-top",
+                        "2",
                     ]
                 )
 
@@ -1693,6 +1705,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("Explanation: Used Human Mode override for slate ....Y.", report)
         self.assertIn("Prior weights:", report)
         self.assertIn("cider:0.05", report)
+        self.assertIn("weighted_expected_remaining", report)
 
     def test_main_reports_tune_pattern_weighted_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4486,6 +4499,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("cider:0.05", row["prior_weights"])
         self.assertEqual(row["recommended_guess"], "drown")
         self.assertEqual(row["explanation"], "Used Human Mode override for slate ....Y.")
+        self.assertEqual(row["alternatives"][0]["guess"], "drown")
+        self.assertEqual(row["alternatives"][0]["weighted_expected_remaining"], "1.00")
         self.assertIn("max_bucket", row)
 
     def test_print_recommendation_outputs_summary(self):
@@ -4503,6 +4518,18 @@ class CliTests(unittest.TestCase):
                     "max_bucket": 1,
                     "bucket_count": 3,
                     "expected_remaining": "1.00",
+                    "show_weighted_expected": False,
+                    "alternatives": (
+                        {
+                            "guess": "diner",
+                            "type": "answer",
+                            "max_bucket": 1,
+                            "bucket_count": 3,
+                            "expected_remaining": "1.00",
+                            "weighted_expected_remaining": "",
+                            "note": "possible answer",
+                        },
+                    ),
                     "explanation": "Chose diner as a possible answer using bucket safety.",
                 }
             )
@@ -4511,6 +4538,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("Recommendation:", report)
         self.assertIn("Recommended next guess: diner", report)
         self.assertIn("Bucket summary:", report)
+        self.assertIn("Alternatives:", report)
+        self.assertIn("diner", report)
 
     def test_build_tune_pattern_rows_rejects_invalid_pattern(self):
         with self.assertRaises(ValueError):
@@ -5302,6 +5331,10 @@ class CliTests(unittest.TestCase):
     def test_state_requires_recommend(self):
         with self.assertRaises(SystemExit):
             main(["--state", "slate", "....Y"])
+
+    def test_recommend_top_requires_positive_limit(self):
+        with self.assertRaises(SystemExit):
+            main(["--recommend", "--state", "slate", "....Y", "--recommend-top", "0"])
 
     def test_top_openers_requires_positive_limit(self):
         with self.assertRaises(SystemExit):

@@ -543,6 +543,13 @@ def build_parser():
         help="alternating guess/feedback pairs for --recommend",
     )
     parser.add_argument(
+        "--recommend-top",
+        type=int,
+        default=5,
+        metavar="N",
+        help="show the top N recommendation alternatives (default: 5)",
+    )
+    parser.add_argument(
         "--answers",
         default=str(DEFAULT_ANSWERS_PATH),
         help=f"possible answer word list (default: {DEFAULT_ANSWERS_PATH})",
@@ -615,6 +622,8 @@ def main(argv=None):
         raise SystemExit("--recommend requires --state")
     if args.state and not args.recommend:
         raise SystemExit("--state can only be used with --recommend")
+    if args.recommend_top < 1:
+        raise SystemExit("--recommend-top must be at least 1")
     if args.top_openers is not None and args.top_openers < 1:
         raise SystemExit("--top-openers must be at least 1")
     if args.limit_openers is not None and args.limit_openers < 1:
@@ -739,6 +748,7 @@ def main(argv=None):
                 prior_answer_weights=prior_answer_weights,
                 strategy=args.strategy or "second-map-bucket",
                 use_overrides=False if args.no_overrides else None,
+                recommend_top=args.recommend_top,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -1353,6 +1363,7 @@ def build_recommendation(
     prior_answer_weights=None,
     strategy="second-map-bucket",
     use_overrides=None,
+    recommend_top=5,
 ):
     path_guesses, path_patterns = parse_tune_path(state_steps, allowed_guesses)
     candidates = filter_candidates_for_path(possible_answers, path_guesses, path_patterns)
@@ -1396,6 +1407,16 @@ def build_recommendation(
             prior_answer_weights=prior_answer_weights,
         )
 
+    alternatives = build_recommendation_alternatives(
+        candidates,
+        path_guesses,
+        probe_pool,
+        recommendation,
+        prior_policy=prior_policy,
+        prior_answer_weights=prior_answer_weights,
+        limit=recommend_top,
+        override_mode=override_mode,
+    )
     bucket_sizes = sorted(feedback_bucket_sizes(recommendation, candidates), reverse=True)
     max_bucket = bucket_sizes[0] if bucket_sizes else 0
     expected_remaining = (
@@ -1418,6 +1439,8 @@ def build_recommendation(
         "max_bucket": max_bucket,
         "bucket_count": len(bucket_sizes),
         "expected_remaining": f"{expected_remaining:.2f}",
+        "alternatives": alternatives,
+        "show_weighted_expected": prior_policy == "downweight" and bool(prior_answer_weights),
         "explanation": build_recommendation_explanation(
             recommendation,
             is_possible_answer,
@@ -1427,6 +1450,85 @@ def build_recommendation(
             override_first=path_guesses[0],
             override_pattern=path_patterns[0],
         ),
+    }
+
+
+def build_recommendation_alternatives(
+    candidates,
+    previous_guesses,
+    guess_pool,
+    recommended_guess,
+    prior_policy="ignore",
+    prior_answer_weights=None,
+    limit=5,
+    override_mode=None,
+):
+    previous = set(previous_guesses)
+    use_weights = prior_policy == "downweight" and bool(prior_answer_weights)
+    ranked_guesses = sorted(
+        (guess for guess in guess_pool if guess not in previous),
+        key=lambda guess: bucket_probe_rank(
+            guess,
+            candidates,
+            prior_answer_weights=prior_answer_weights if use_weights else None,
+        ),
+    )
+    ordered_guesses = [recommended_guess]
+    ordered_guesses.extend(guess for guess in ranked_guesses if guess != recommended_guess)
+    rows = []
+    for guess in ordered_guesses[:limit]:
+        note = ""
+        if guess == recommended_guess and override_mode:
+            note = f"{override_mode} override"
+        elif guess in set(candidates):
+            note = "possible answer"
+        else:
+            note = "probe"
+        rows.append(
+            build_recommendation_alternative_row(
+                guess,
+                candidates,
+                prior_answer_weights if use_weights else None,
+                note,
+            )
+        )
+    return tuple(rows)
+
+
+def build_recommendation_alternative_row(
+    guess,
+    candidates,
+    prior_answer_weights=None,
+    note="",
+):
+    buckets = defaultdict(list)
+    for candidate in candidates:
+        buckets[score_guess(guess, candidate)].append(candidate)
+    bucket_sizes = sorted((len(bucket) for bucket in buckets.values()), reverse=True)
+    expected_remaining = (
+        sum(size * size for size in bucket_sizes) / len(candidates)
+        if candidates
+        else 0
+    )
+    weighted_expected = ""
+    if prior_answer_weights:
+        total_weight = sum(prior_weight_for_word(candidate, prior_answer_weights) for candidate in candidates)
+        weighted_sum = 0.0
+        for bucket in buckets.values():
+            bucket_weight = sum(
+                prior_weight_for_word(candidate, prior_answer_weights)
+                for candidate in bucket
+            )
+            weighted_sum += bucket_weight * len(bucket)
+        weighted_expected = f"{(weighted_sum / total_weight if total_weight else 0):.2f}"
+    return {
+        "guess": guess,
+        "type": "answer" if guess in set(candidates) else "probe",
+        "max_bucket": bucket_sizes[0] if bucket_sizes else 0,
+        "bucket_count": len(bucket_sizes),
+        "expected_remaining": f"{expected_remaining:.2f}",
+        "weighted_expected_remaining": weighted_expected,
+        "note": note,
     }
 
 
@@ -1512,6 +1614,31 @@ def print_recommendation(row):
         f"expected_remaining={row['expected_remaining']}"
     )
     print(f"Explanation: {row['explanation']}")
+    print("Alternatives:")
+    if row["show_weighted_expected"]:
+        print("guess  type    max_bucket  bucket_count  expected_remaining  weighted_expected_remaining  notes")
+    else:
+        print("guess  type    max_bucket  bucket_count  expected_remaining  notes")
+    for alternative in row["alternatives"]:
+        if row["show_weighted_expected"]:
+            print(
+                f"{alternative['guess']:<6} "
+                f"{alternative['type']:<7} "
+                f"{alternative['max_bucket']:<11} "
+                f"{alternative['bucket_count']:<13} "
+                f"{alternative['expected_remaining']:<19} "
+                f"{alternative['weighted_expected_remaining']:<28} "
+                f"{alternative['note']}"
+            )
+        else:
+            print(
+                f"{alternative['guess']:<6} "
+                f"{alternative['type']:<7} "
+                f"{alternative['max_bucket']:<11} "
+                f"{alternative['bucket_count']:<13} "
+                f"{alternative['expected_remaining']:<19} "
+                f"{alternative['note']}"
+            )
 
 
 def print_timing_report(elapsed_seconds, opener_count):
