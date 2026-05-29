@@ -3,6 +3,7 @@
 import argparse
 import csv
 import re
+import sys
 import time
 from collections import Counter, defaultdict
 from datetime import date
@@ -21,6 +22,9 @@ from .simulator import (
     load_word_lists,
     run_simulation,
 )
+
+FULL_ANSWERS_PATH = DEFAULT_ANSWERS_PATH.parent / "wordle_answers_full.txt"
+FULL_ALLOWED_GUESSES_PATH = DEFAULT_ALLOWED_GUESSES_PATH.parent / "wordle_allowed_guesses_full.txt"
 
 CSV_COLUMNS = (
     "first_guess",
@@ -304,6 +308,18 @@ def build_parser():
         "--recommend",
         action="store_true",
         help="recommend the next guess from a partial game state",
+    )
+    mode.add_argument(
+        "--human-recommend",
+        nargs="+",
+        metavar="STEP",
+        help="Human Mode shortcut for --recommend with full word lists and dated priors",
+    )
+    mode.add_argument(
+        "--pure-recommend",
+        nargs="+",
+        metavar="STEP",
+        help="Pure Mode shortcut for --recommend with full word lists",
     )
     parser.add_argument(
         "--csv",
@@ -604,9 +620,29 @@ def build_parser():
     return parser
 
 
+def apply_recommend_shortcuts(args, raw_args=None):
+    shortcut_steps = args.human_recommend or args.pure_recommend
+    if not shortcut_steps:
+        return
+    raw_args = raw_args or ()
+    args.recommend = True
+    args.state = shortcut_steps
+    args.strategy = args.strategy or "second-map-bucket"
+    args.second_guess_pool = "answers"
+    args.answers = str(FULL_ANSWERS_PATH)
+    args.allowed = str(FULL_ALLOWED_GUESSES_PATH)
+    if "--recommend-top" not in raw_args:
+        args.recommend_top = 10
+    if args.human_recommend:
+        args.prior_answers_dated = str(DEFAULT_PRIOR_ANSWERS_DATED_PATH)
+        args.prior_policy = "downweight"
+
+
 def main(argv=None):
     parser = build_parser()
+    raw_args = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(argv)
+    apply_recommend_shortcuts(args, raw_args)
     if args.csv and not (
         args.compare or args.compare_openers_with_strategy or args.top_openers
         or args.second_guess_map or args.build_second_map or args.strategy

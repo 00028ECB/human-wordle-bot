@@ -342,6 +342,16 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.state, ["slate", "....Y", "drown", ".Y..."])
         self.assertEqual(args.recommend_top, 3)
 
+    def test_parser_accepts_human_recommend(self):
+        args = build_parser().parse_args(["--human-recommend", "slate", "....Y"])
+
+        self.assertEqual(args.human_recommend, ["slate", "....Y"])
+
+    def test_parser_accepts_pure_recommend(self):
+        args = build_parser().parse_args(["--pure-recommend", "slate", "....Y"])
+
+        self.assertEqual(args.pure_recommend, ["slate", "....Y"])
+
     def test_parser_accepts_top_for_tune_pattern(self):
         args = build_parser().parse_args(
             ["--tune-pattern", "slate", "....Y", "--top", "10"]
@@ -1706,6 +1716,28 @@ class CliTests(unittest.TestCase):
         self.assertIn("Prior weights:", report)
         self.assertIn("cider:0.05", report)
         self.assertIn("weighted_expected_remaining", report)
+
+    def test_main_pure_recommend_shortcut_uses_full_defaults(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            main(["--pure-recommend", "slate", "....Y", "--recommend-top", "1"])
+
+        report = output.getvalue()
+        self.assertIn("Recommendation:", report)
+        self.assertIn("Recommended next guess: rocky", report)
+        self.assertNotIn("Prior weights:", report)
+
+    def test_main_human_recommend_shortcut_uses_human_defaults(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            main(["--human-recommend", "slate", "....Y", "--recommend-top", "1"])
+
+        report = output.getvalue()
+        self.assertIn("Recommendation:", report)
+        self.assertIn("Recommended next guess: drown", report)
+        self.assertIn("Prior weights:", report)
 
     def test_main_reports_tune_pattern_weighted_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:

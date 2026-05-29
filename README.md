@@ -144,6 +144,16 @@ python -m src.wordle_lab \
   --state slate ....Y
 ```
 
+For daily play, the friendly shortcuts use the full word lists and answer-only `second-map-bucket` recommendations:
+
+```bash
+python -m src.wordle_lab --pure-recommend slate ....Y
+python -m src.wordle_lab --human-recommend slate ....Y
+python -m src.wordle_lab --human-recommend slate ....Y drown .Y...
+```
+
+`--human-recommend` also uses `data/prior_answers_dated.csv`, `--prior-policy downweight`, and `--recommend-top 10` by default. It uses the latest date in the dated prior file unless `--as-of-date YYYY-MM-DD` is supplied. `--pure-recommend` uses the same full word lists without prior weighting. Both shortcuts allow `--recommend-top N`.
+
 Use `--recommend-top N` to show ranked alternatives. The first row matches the recommended next guess and each row shows whether the guess is an answer or probe, its largest feedback bucket, bucket count, expected remaining candidates, and weighted expected remaining when Human Mode downweighting is active.
 
 Human Mode recommendations use dated prior-answer weights when provided:
