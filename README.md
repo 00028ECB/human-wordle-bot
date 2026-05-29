@@ -1,13 +1,13 @@
 # Wordle Lab
 
-A small local Python project for experimenting with Wordle strategies.
+A local Python lab for experimenting with Wordle strategy.
 
-This first version is intentionally simple:
+Wordle Lab supports both Pure Mode benchmarking and Human Mode daily recommendations:
 
-- loads word lists from local text files
-- scores guesses with normal Wordle green/yellow/gray logic
-- runs a basic filtering strategy over every possible answer
-- reports the average number of guesses
+- Pure Mode runs fair equal-answer benchmarks over local word lists.
+- Human Mode uses dated prior-answer history, recency weighting, and tuned overrides for real-world daily play.
+- All scoring uses normal Wordle green/yellow/gray feedback logic.
+- Everything runs locally from the command line.
 
 No web app, network access, packages, API keys, or secrets are needed.
 
@@ -15,7 +15,7 @@ No web app, network access, packages, API keys, or secrets are needed.
 
 ### Pure Mode Champion
 
-Purpose: uniform benchmark across all 2,315 answer words. Every answer counts equally.
+Purpose: uniform benchmark across all 2,315 answer words. Every answer counts equally. This is the canonical equal-answer benchmark.
 
 Current command:
 
@@ -50,7 +50,7 @@ Notes: this is the clean mathematical benchmark mode. It does not use prior-answ
 
 ### Human Mode Champion
 
-Purpose: real-world daily-play mode. Uses dated prior-answer history, recency weighting, Human Mode overrides, and streak-safe bucket logic.
+Purpose: real-world daily-play mode. Uses dated prior-answer history, recency weighting, Human Mode overrides, and streak-safe bucket logic. This is the current weighted daily-play champion.
 
 Current command:
 
@@ -68,7 +68,7 @@ python -m src.wordle_lab \
   --weighted-worst-patterns 25
 ```
 
-Current weighted result:
+Current weighted result, as of `2026-05-28`:
 
 ```text
 Strategy: second-map-bucket
@@ -141,7 +141,7 @@ Pure slate ....Y recommends rocky.
 Human slate ....Y drown .Y... recommends furry.
 ```
 
-Pure Mode is for fair mathematical comparison. Human Mode is for real-world daily play. Wordle now allows repeats, so Human Mode uses downweighting rather than treating prior answers as impossible. `--prior-policy exclude` is diagnostic, not the preferred real-world mode.
+Pure Mode is for fair mathematical comparison. Human Mode is for real-world daily play. They should not be compared as if they are the same benchmark. Wordle now allows repeats, so Human Mode uses downweighting rather than treating prior answers as impossible. `--prior-policy exclude` is diagnostic, not the preferred real-world mode.
 
 ## Project Structure
 
@@ -149,8 +149,14 @@ Pure Mode is for fair mathematical comparison. Human Mode is for real-world dail
 wordle-lab/
   README.md
   data/
-    allowed_guesses.txt
-    answers.txt
+    answers.txt                         # tiny starter/test answer list
+    allowed_guesses.txt                 # tiny starter/test allowed-guess list
+    wordle_answers_full.txt             # full answer list used for champion benchmarks
+    wordle_allowed_guesses_full.txt     # full allowed-guess list used for champion benchmarks
+    prior_answers.txt                   # plain historical prior-answer list
+    prior_answers_dated.csv             # dated historical prior-answer list for Human Mode
+  results/
+    ...                                 # optional CSV outputs from local runs
   src/
     wordle_lab/
       __init__.py
@@ -236,7 +242,7 @@ python -m src.wordle_lab --strategy baseline --first slate
 python -m src.wordle_lab --strategy second-map --first slate --second-guess-pool answers
 python -m src.wordle_lab --strategy second-map-trap --first slate --second-guess-pool answers --show-worst 25
 python -m src.wordle_lab --strategy second-map-bucket --first slate --second-guess-pool answers --show-worst 25
-python -m src.wordle_lab --strategy second-map-expected --first slate --second-guess-pool answers --endgame-threshold 25
+python -m src.wordle_lab --strategy second-map-expected --first slate --second-guess-pool answers --endgame-threshold 10
 python -m src.wordle_lab --strategy second-map-hybrid --first slate --second-guess-pool answers --trap-threshold 3
 python -m src.wordle_lab --strategy second-map --first slate --second-guess-pool answers --show-worst 25
 python -m src.wordle_lab --strategy second-map-bucket --first slate --second-guess-pool answers --worst-patterns 20
@@ -258,7 +264,7 @@ python -m src.wordle_lab --compare-strategies --csv results/strategy_leaderboard
 
 `second-map-bucket` starts the same way, then chooses later guesses by minimizing the largest feedback bucket among the remaining candidates. This catches broader trap families that do not share exactly four fixed positions.
 
-`second-map-expected` starts like `second-map-bucket`, then uses the bucket strategy above `--endgame-threshold` and a memoized expected-value search at or below that candidate count. The default threshold is 25.
+`second-map-expected` starts like `second-map-bucket`, then uses the bucket strategy above `--endgame-threshold` and a guarded memoized expected-value search at or below that candidate count. The default threshold is 10.
 
 `second-map-hybrid` uses the normal candidate guess unless it would leave a feedback bucket larger than `--trap-threshold`; then it switches to the bucket probe. The default threshold is 2.
 
@@ -357,6 +363,8 @@ Wordle Lab can be used in two broad ways:
 - **Pure Mode** treats every answer in the answer list as equally likely. This is best for strategy research, regression testing, and apples-to-apples benchmarks.
 - **Human Mode** uses prior-answer history to model real Wordle play. It can exclude or downweight words that have already appeared.
 
+The current champion results are summarized near the top; this section explains the modes and commands.
+
 The current Pure Mode benchmark champion is:
 
 ```text
@@ -389,13 +397,19 @@ date,word
 Show plain prior-answer stats:
 
 ```bash
-python -m src.wordle_lab --prior-stats
+python -m src.wordle_lab \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --prior-answers data/prior_answers.txt \
+  --prior-stats
 ```
 
 Show dated prior-answer stats:
 
 ```bash
-python -m src.wordle_lab --prior-dated-stats
+python -m src.wordle_lab \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --prior-dated-stats
 ```
 
 Show prior weight buckets for the configured answer list:
@@ -408,6 +422,8 @@ python -m src.wordle_lab \
   --as-of-date 2026-05-28 \
   --prior-weight-stats
 ```
+
+These commands also have project defaults, but the explicit paths above match the full-list Human Mode workflow.
 
 Clean a pasted or downloaded historical answer source into `data/prior_answers.txt`:
 
