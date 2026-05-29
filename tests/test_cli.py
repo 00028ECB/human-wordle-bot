@@ -5,6 +5,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from src.wordle_lab.__main__ import (
+    BUILT_SECOND_MAP_COLUMNS,
     CSV_COLUMNS,
     SECOND_GUESS_COLUMNS,
     STRATEGY_COLUMNS,
@@ -20,6 +21,8 @@ from src.wordle_lab.__main__ import (
     build_comparison_rows,
     build_comparison_row,
     build_parser,
+    build_full_second_map_rows,
+    build_second_map_row_for_pattern,
     build_second_guess_map_rows,
     build_opener_strategy_comparison_rows,
     build_strategy_comparison_rows,
@@ -56,26 +59,36 @@ from src.wordle_lab.__main__ import (
     format_tune_path_label,
     format_remaining_candidates,
     is_trap_family,
+    load_built_second_map,
+    open_incremental_built_second_map_csv,
     main,
     play_second_map_game,
+    print_built_second_map,
     print_final_clusters,
     print_final_cluster_override_changes,
     print_opener_strategy_report,
     print_small_order_changes,
     tune_pattern_objective_rank,
     print_worst_prefixes,
+    read_completed_built_second_map_patterns,
+    run_build_second_map,
+    second_guess_candidate_rank,
+    select_second_map_patterns,
+    select_second_guess_candidates,
     tune_objective_rank,
     tuned_overrides_enabled,
     worst_csv_path,
     write_worst_games_csv,
     write_second_guess_csv,
     write_comparison_csv,
+    write_built_second_map_csv,
     write_strategy_csv,
     write_opener_strategy_csv,
     write_tune_branch_csv,
     write_tune_path_csv,
     write_tune_pattern_csv,
 )
+from src.wordle_lab.scoring import score_guess
 from src.wordle_lab.simulator import GameResult, run_simulation
 
 
@@ -127,6 +140,69 @@ class CliTests(unittest.TestCase):
         args = build_parser().parse_args(["--second-guess-map", "slate"])
 
         self.assertEqual(args.second_guess_map, "slate")
+
+    def test_parser_accepts_build_second_map(self):
+        args = build_parser().parse_args(
+            [
+                "--build-second-map",
+                "slate",
+                "--strategy",
+                "second-map-bucket",
+                "--second-guess-pool",
+                "answers",
+                "--tune-pattern-objective",
+                "safe-balanced",
+            ]
+        )
+
+        self.assertEqual(args.build_second_map, "slate")
+        self.assertEqual(args.strategy, "second-map-bucket")
+        self.assertEqual(args.tune_pattern_objective, "safe-balanced")
+
+    def test_parser_accepts_resumable_build_second_map_options(self):
+        args = build_parser().parse_args(
+            [
+                "--build-second-map",
+                "slate",
+                "--force",
+                "--only-pattern",
+                "....Y",
+                "--only-pattern",
+                ".....",
+                "--max-patterns",
+                "2",
+                "--only-worst-patterns",
+                "3",
+                "--min-candidates",
+                "4",
+                "--max-second-guesses",
+                "50",
+                "--second-guess-candidates",
+                "top",
+            ]
+        )
+
+        self.assertTrue(args.force)
+        self.assertEqual(args.only_pattern, ["....Y", "....."])
+        self.assertEqual(args.max_patterns, 2)
+        self.assertEqual(args.only_worst_patterns, 3)
+        self.assertEqual(args.min_candidates, 4)
+        self.assertEqual(args.max_second_guesses, 50)
+        self.assertEqual(args.second_guess_candidates, "top")
+
+    def test_parser_accepts_use_built_second_map(self):
+        args = build_parser().parse_args(
+            [
+                "--strategy",
+                "second-map-bucket",
+                "--first",
+                "slate",
+                "--use-built-second-map",
+                "results/map.csv",
+            ]
+        )
+
+        self.assertEqual(args.use_built_second_map, "results/map.csv")
 
     def test_parser_accepts_compare_strategies(self):
         args = build_parser().parse_args(["--compare-strategies"])
@@ -2500,6 +2576,366 @@ class CliTests(unittest.TestCase):
 
         self.assertNotIn("worst_branch_pattern", rows[0])
 
+    def test_build_full_second_map_rows_returns_one_row_per_pattern(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        rows = build_full_second_map_rows(
+            "slate",
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            second_guess_pool=answer_words,
+            objective="branch-safe",
+        )
+
+        expected_patterns = {score_guess("slate", answer) for answer in answer_words}
+        self.assertEqual({row["pattern"] for row in rows}, expected_patterns)
+        self.assertIn("best_second", rows[0])
+        self.assertIn("worst_branch_risk", rows[0])
+
+    def test_build_second_map_row_for_pattern_returns_best_row(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+        pattern = score_guess("slate", "slate")
+
+        row = build_second_map_row_for_pattern(
+            "slate",
+            pattern,
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            second_guess_pool=answer_words,
+        )
+
+        self.assertEqual(row["first"], "slate")
+        self.assertEqual(row["pattern"], "GGGGG")
+        self.assertIn(row["best_second"], answer_words)
+
+    def test_build_second_map_row_for_pattern_limits_second_guesses(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+        pattern = score_guess("slate", "slate")
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            row = build_second_map_row_for_pattern(
+                "slate",
+                pattern,
+                "second-map-bucket",
+                allowed_words,
+                answer_words,
+                second_guess_pool=answer_words,
+                max_second_guesses=1,
+                show_progress=True,
+            )
+
+        self.assertEqual(row["best_second"], "raise")
+        self.assertIn("evaluated 1/1 second guesses", output.getvalue())
+
+    def test_build_second_map_row_metrics_match_tune_pattern_for_same_second(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+        pattern = score_guess("slate", "slate")
+
+        built_row = build_second_map_row_for_pattern(
+            "slate",
+            pattern,
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            second_guess_pool=answer_words,
+            max_second_guesses=1,
+        )
+        tune_rows, _games = build_tune_pattern_result(
+            "slate",
+            pattern,
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            second_guess_pool=answer_words,
+            second_guess=built_row["best_second"],
+            branch_summary=True,
+        )
+        tune_row = tune_rows[0]
+
+        self.assertEqual(built_row["average"], tune_row["average"])
+        self.assertEqual(built_row["solved_3_or_less"], tune_row["solved_3_or_less"])
+        self.assertEqual(built_row["solved_4_or_less"], tune_row["solved_4_or_less"])
+        self.assertEqual(built_row["fives"], tune_row["fives"])
+        self.assertEqual(built_row["sixes"], tune_row["sixes"])
+        self.assertEqual(built_row["failed"], tune_row["failed"])
+        self.assertEqual(built_row["risk_score"], tune_row["risk_score"])
+        self.assertEqual(
+            built_row["worst_branch_pattern"],
+            tune_row["worst_branch_pattern"],
+        )
+        self.assertEqual(
+            built_row["worst_branch_candidates"],
+            tune_row["worst_branch_candidates"],
+        )
+        self.assertEqual(
+            built_row["worst_branch_fives"],
+            tune_row["worst_branch_fives"],
+        )
+        self.assertEqual(
+            built_row["worst_branch_risk"],
+            tune_row["worst_branch_risk"],
+        )
+
+    def test_select_second_guess_candidates_can_limit_all_mode(self):
+        selected = select_second_guess_candidates(
+            ("raise", "slate", "crane"),
+            ("slate",),
+            max_second_guesses=2,
+            mode="all",
+        )
+
+        self.assertEqual(selected, ("raise", "slate"))
+
+    def test_select_second_guess_candidates_top_is_deterministic(self):
+        selected = select_second_guess_candidates(
+            ("buzzy", "crane", "slate"),
+            ("raise", "slate"),
+            max_second_guesses=2,
+            mode="top",
+        )
+
+        self.assertEqual(selected, ("slate", "crane"))
+
+    def test_second_guess_candidate_rank_prefers_coverage(self):
+        candidates = ("raise", "slate")
+
+        self.assertLess(
+            second_guess_candidate_rank("slate", candidates),
+            second_guess_candidate_rank("buzzy", candidates),
+        )
+
+    def test_select_second_map_patterns_filters_patterns_and_candidates(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+        slate_pattern = score_guess("slate", "slate")
+
+        selected = select_second_map_patterns(
+            "slate",
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            "answers",
+            trap_threshold=2,
+            answer_weighting="off",
+            small_candidate_order="normal",
+            only_patterns=(slate_pattern,),
+            min_candidates=1,
+        )
+
+        self.assertEqual(selected, ((slate_pattern, ("slate",)),))
+
+    def test_select_second_map_patterns_supports_max_patterns(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        selected = select_second_map_patterns(
+            "trace",
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            "answers",
+            trap_threshold=2,
+            answer_weighting="off",
+            small_candidate_order="normal",
+            max_patterns=1,
+        )
+
+        self.assertEqual(len(selected), 1)
+
+    def test_select_second_map_patterns_supports_only_worst_patterns(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        selected = select_second_map_patterns(
+            "trace",
+            "second-map-bucket",
+            allowed_words,
+            answer_words,
+            "answers",
+            trap_threshold=2,
+            answer_weighting="off",
+            small_candidate_order="normal",
+            only_worst_patterns=1,
+        )
+
+        self.assertEqual(len(selected), 1)
+
+    def test_run_build_second_map_writes_incremental_csv_and_resumes(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "built.csv"
+            output = io.StringIO()
+            with redirect_stdout(output):
+                first_rows = run_build_second_map(
+                    "slate",
+                    "second-map-bucket",
+                    allowed_words,
+                    answer_words,
+                    second_guess_pool=answer_words,
+                    second_guess_pool_name="answers",
+                    csv_path=csv_path,
+                    max_patterns=1,
+                    max_second_guesses=1,
+                )
+            csv_text = csv_path.read_text(encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                second_rows = run_build_second_map(
+                    "slate",
+                    "second-map-bucket",
+                    allowed_words,
+                    answer_words,
+                    second_guess_pool=answer_words,
+                    second_guess_pool_name="answers",
+                    csv_path=csv_path,
+                    max_patterns=1,
+                    max_second_guesses=1,
+                )
+
+        self.assertEqual(len(first_rows), 1)
+        self.assertEqual(second_rows, ())
+        self.assertIn(",".join(BUILT_SECOND_MAP_COLUMNS), csv_text)
+        self.assertIn("Built 1/1 pattern", output.getvalue())
+
+    def test_run_build_second_map_force_rebuilds_existing_csv(self):
+        allowed_words = ("raise", "slate", "crane", "trace")
+        answer_words = ("raise", "slate", "crane")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "built.csv"
+            with redirect_stdout(io.StringIO()):
+                run_build_second_map(
+                    "slate",
+                    "second-map-bucket",
+                    allowed_words,
+                    answer_words,
+                    second_guess_pool=answer_words,
+                    second_guess_pool_name="answers",
+                    csv_path=csv_path,
+                    max_patterns=1,
+                    max_second_guesses=1,
+                )
+                rows = run_build_second_map(
+                    "slate",
+                    "second-map-bucket",
+                    allowed_words,
+                    answer_words,
+                    second_guess_pool=answer_words,
+                    second_guess_pool_name="answers",
+                    csv_path=csv_path,
+                    max_patterns=1,
+                    force=True,
+                    max_second_guesses=1,
+                )
+
+        self.assertEqual(len(rows), 1)
+
+    def test_read_completed_built_second_map_patterns_reads_existing_rows(self):
+        rows = (
+            {
+                "first": "slate",
+                "pattern": "GGGGG",
+                "candidates": 1,
+                "best_second": "slate",
+                "average": "1.00",
+                "solved_3_or_less": 1,
+                "solved_4_or_less": 1,
+                "fives": 0,
+                "sixes": 0,
+                "failed": 0,
+                "risk_score": 0,
+                "worst_branch_pattern": "GGGGG",
+                "worst_branch_candidates": 1,
+                "worst_branch_fives": 0,
+                "worst_branch_risk": 0,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "built.csv"
+            write_built_second_map_csv(path, rows)
+
+            completed = read_completed_built_second_map_patterns(path, "slate")
+
+        self.assertEqual(completed, {"GGGGG"})
+
+    def test_open_incremental_built_second_map_csv_writes_header_immediately(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "built.csv"
+            csv_file, _writer = open_incremental_built_second_map_csv(path, force=False)
+            csv_file.close()
+
+            csv_text = path.read_text(encoding="utf-8")
+
+        self.assertIn(",".join(BUILT_SECOND_MAP_COLUMNS), csv_text)
+
+    def test_load_built_second_map_reads_matching_first_rows(self):
+        rows = (
+            {
+                "first": "slate",
+                "pattern": "GGGGG",
+                "candidates": 1,
+                "best_second": "slate",
+                "average": "1.00",
+                "solved_3_or_less": 1,
+                "solved_4_or_less": 1,
+                "fives": 0,
+                "sixes": 0,
+                "failed": 0,
+                "risk_score": 0,
+                "worst_branch_pattern": "GGGGG",
+                "worst_branch_candidates": 1,
+                "worst_branch_fives": 0,
+                "worst_branch_risk": 0,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "map.csv"
+            write_built_second_map_csv(path, rows)
+
+            second_map = load_built_second_map(path, "slate", ("slate",))
+
+        self.assertEqual(second_map, {"GGGGG": "slate"})
+
+    def test_print_built_second_map_outputs_table(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_built_second_map(
+                (
+                    {
+                        "first": "slate",
+                        "pattern": "GGGGG",
+                        "candidates": 1,
+                        "best_second": "slate",
+                        "average": "1.00",
+                        "solved_3_or_less": 1,
+                        "solved_4_or_less": 1,
+                        "fives": 0,
+                        "sixes": 0,
+                        "failed": 0,
+                        "risk_score": 0,
+                        "worst_branch_pattern": "GGGGG",
+                        "worst_branch_candidates": 1,
+                        "worst_branch_fives": 0,
+                        "worst_branch_risk": 0,
+                    },
+                )
+            )
+
+        report = output.getvalue()
+        self.assertIn("First  Pattern", report)
+        self.assertIn("Best2", report)
+
     def test_build_second_feedback_branch_summary_reports_worst_branch(self):
         candidates = ("raise", "crane")
         games = (
@@ -3091,6 +3527,83 @@ class CliTests(unittest.TestCase):
 
         self.assertIn(",".join(TUNE_PATTERN_BRANCH_COLUMNS), csv_text)
         self.assertIn("worst_branch_pattern", csv_text)
+
+    def test_main_build_second_map_with_csv_writes_file_and_prints_table(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            csv_path = temp_path / "results" / "built_second_map.csv"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--build-second-map",
+                        "slate",
+                        "--strategy",
+                        "second-map-bucket",
+                        "--second-guess-pool",
+                        "answers",
+                        "--tune-pattern-objective",
+                        "branch-safe",
+                        "--csv",
+                        str(csv_path),
+                    ]
+                )
+
+            report = output.getvalue()
+            csv_text = csv_path.read_text(encoding="utf-8")
+
+        self.assertIn("First  Pattern", report)
+        self.assertIn(",".join(BUILT_SECOND_MAP_COLUMNS), csv_text)
+        self.assertIn("best_second", csv_text)
+
+    def test_main_strategy_can_use_built_second_map_csv(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            map_path = temp_path / "results" / "built_second_map.csv"
+            answers_path.write_text("raise\nslate\ncrane\n", encoding="utf-8")
+            allowed_path.write_text("raise\nslate\ncrane\ntrace\n", encoding="utf-8")
+            allowed_words = ("raise", "slate", "crane", "trace")
+            answer_words = ("raise", "slate", "crane")
+            rows = build_full_second_map_rows(
+                "slate",
+                "second-map-bucket",
+                allowed_words,
+                answer_words,
+                second_guess_pool=answer_words,
+            )
+            write_built_second_map_csv(map_path, rows)
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main(
+                    [
+                        "--answers",
+                        str(answers_path),
+                        "--allowed",
+                        str(allowed_path),
+                        "--strategy",
+                        "second-map-bucket",
+                        "--first",
+                        "slate",
+                        "--second-guess-pool",
+                        "answers",
+                        "--use-built-second-map",
+                        str(map_path),
+                    ]
+                )
+
+        self.assertIn("second-map-bucket", output.getvalue())
 
     def test_main_tune_branch_with_csv_writes_file_and_prints_table(self):
         with tempfile.TemporaryDirectory() as temp_dir:

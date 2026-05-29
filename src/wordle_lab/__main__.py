@@ -95,6 +95,24 @@ TUNE_PATTERN_BRANCH_COLUMNS = TUNE_PATTERN_COLUMNS + (
     "worst_branch_risk",
 )
 
+BUILT_SECOND_MAP_COLUMNS = (
+    "first",
+    "pattern",
+    "candidates",
+    "best_second",
+    "average",
+    "solved_3_or_less",
+    "solved_4_or_less",
+    "fives",
+    "sixes",
+    "failed",
+    "risk_score",
+    "worst_branch_pattern",
+    "worst_branch_candidates",
+    "worst_branch_fives",
+    "worst_branch_risk",
+)
+
 TUNE_BRANCH_COLUMNS = (
     "first_pattern",
     "second_guess",
@@ -212,6 +230,11 @@ def build_parser():
         "--second-guess-map",
         metavar="FIRST",
         help="map first-guess feedback patterns to recommended second guesses",
+    )
+    mode.add_argument(
+        "--build-second-map",
+        metavar="FIRST",
+        help="build a tuned second-guess map for every first-feedback pattern",
     )
     mode.add_argument(
         "--compare-strategies",
@@ -368,9 +391,56 @@ def build_parser():
     )
     parser.add_argument(
         "--tune-pattern-objective",
-        choices=("risk", "branch-safe"),
+        choices=("risk", "branch-safe", "safe-balanced"),
         default="risk",
         help="ranking objective for --tune-pattern (default: risk)",
+    )
+    parser.add_argument(
+        "--use-built-second-map",
+        metavar="PATH",
+        help="use a CSV built by --build-second-map instead of the default second map",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="rebuild resumable outputs from scratch",
+    )
+    parser.add_argument(
+        "--only-pattern",
+        action="append",
+        metavar="PATTERN",
+        help="build only this first-feedback pattern; may be repeated",
+    )
+    parser.add_argument(
+        "--max-patterns",
+        type=int,
+        metavar="N",
+        help="build at most N selected first-feedback patterns",
+    )
+    parser.add_argument(
+        "--only-worst-patterns",
+        type=int,
+        metavar="N",
+        help="for --build-second-map, build only the N worst first-feedback patterns for the selected strategy",
+    )
+    parser.add_argument(
+        "--min-candidates",
+        type=int,
+        default=1,
+        metavar="N",
+        help="for --build-second-map, skip patterns with fewer than N candidate answers (default: 1)",
+    )
+    parser.add_argument(
+        "--max-second-guesses",
+        type=int,
+        metavar="N",
+        help="for --build-second-map, evaluate at most N second guesses per pattern",
+    )
+    parser.add_argument(
+        "--second-guess-candidates",
+        choices=("top", "all"),
+        default="all",
+        help="second-guess candidate selection for --build-second-map (default: all)",
     )
     parser.add_argument(
         "--answer-weighting",
@@ -432,11 +502,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.csv and not (
         args.compare or args.compare_openers_with_strategy or args.top_openers
-        or args.second_guess_map or args.strategy or args.compare_strategies
-        or args.tune_pattern or args.tune_branch or args.tune_path
+        or args.second_guess_map or args.build_second_map or args.strategy
+        or args.compare_strategies or args.tune_pattern or args.tune_branch
+        or args.tune_path
     ):
         raise SystemExit(
-            "--csv can only be used with --compare, --compare-openers-with-strategy, --top-openers, --second-guess-map, --strategy, --compare-strategies, --tune-pattern, --tune-branch, or --tune-path"
+            "--csv can only be used with --compare, --compare-openers-with-strategy, --top-openers, --second-guess-map, --build-second-map, --strategy, --compare-strategies, --tune-pattern, --tune-branch, or --tune-path"
         )
     if args.compare_openers_with_strategy and not args.strategy:
         raise SystemExit("--compare-openers-with-strategy requires --strategy")
@@ -480,6 +551,14 @@ def main(argv=None):
         raise SystemExit("--expected-depth must be at least 1")
     if args.top < 1:
         raise SystemExit("--top must be at least 1")
+    if args.max_patterns is not None and args.max_patterns < 1:
+        raise SystemExit("--max-patterns must be at least 1")
+    if args.only_worst_patterns is not None and args.only_worst_patterns < 1:
+        raise SystemExit("--only-worst-patterns must be at least 1")
+    if args.min_candidates < 1:
+        raise SystemExit("--min-candidates must be at least 1")
+    if args.max_second_guesses is not None and args.max_second_guesses < 1:
+        raise SystemExit("--max-second-guesses must be at least 1")
 
     try:
         allowed_guesses, possible_answers = load_word_lists(
@@ -525,6 +604,35 @@ def main(argv=None):
         print_strategy_report(rows)
         if args.csv:
             write_strategy_csv(args.csv, rows)
+        return
+    if args.build_second_map:
+        second_guess_pool = (
+            allowed_guesses if args.second_guess_pool == "allowed" else possible_answers
+        )
+        try:
+            rows = run_build_second_map(
+                args.build_second_map.lower(),
+                args.strategy or "second-map-bucket",
+                allowed_guesses,
+                possible_answers,
+                second_guess_pool,
+                second_guess_pool_name=args.second_guess_pool,
+                trap_threshold=args.trap_threshold,
+                answer_weighting=args.answer_weighting,
+                small_candidate_order=args.small_candidate_order,
+                objective=args.tune_pattern_objective,
+                csv_path=args.csv,
+                force=args.force,
+                only_patterns=args.only_pattern,
+                max_patterns=args.max_patterns,
+                only_worst_patterns=args.only_worst_patterns,
+                min_candidates=args.min_candidates,
+                max_second_guesses=args.max_second_guesses,
+                second_guess_candidates=args.second_guess_candidates,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+        print_built_second_map(rows)
         return
     if args.tune_pattern:
         first_guess, pattern = args.tune_pattern
@@ -643,6 +751,7 @@ def main(argv=None):
                     if args.show_final_cluster_override_changes
                     else None
                 ),
+                built_second_map_path=args.use_built_second_map,
             )
         except ValueError as error:
             parser.error(str(error))
@@ -894,6 +1003,14 @@ def tune_pattern_objective_rank(row, objective="risk"):
             average,
             row["second_guess"],
         )
+    if objective == "safe-balanced":
+        return (
+            row["sixes"],
+            row["fives"],
+            row["risk_score"],
+            average,
+            row["second_guess"],
+        )
     raise ValueError(f"Unsupported tune-pattern objective: {objective}")
 
 
@@ -903,6 +1020,353 @@ def strip_tune_pattern_branch_summary(row):
         for key, value in row.items()
         if key not in TUNE_PATTERN_BRANCH_COLUMNS[len(TUNE_PATTERN_COLUMNS):]
     }
+
+
+def build_full_second_map_rows(
+    first_guess,
+    strategy,
+    allowed_guesses,
+    possible_answers,
+    second_guess_pool,
+    trap_threshold=2,
+    answer_weighting="off",
+    small_candidate_order="normal",
+    objective="risk",
+):
+    validate_tune_pattern(first_guess, "." * len(first_guess), strategy, allowed_guesses)
+    return tuple(
+        build_second_map_row_for_pattern(
+            first_guess,
+            pattern,
+            strategy,
+            allowed_guesses,
+            possible_answers,
+            second_guess_pool,
+            trap_threshold,
+            answer_weighting,
+            small_candidate_order,
+            objective,
+        )
+        for pattern, _candidates in first_pattern_candidate_groups(
+            first_guess,
+            possible_answers,
+        )
+    )
+
+
+def run_build_second_map(
+    first_guess,
+    strategy,
+    allowed_guesses,
+    possible_answers,
+    second_guess_pool,
+    second_guess_pool_name="allowed",
+    trap_threshold=2,
+    answer_weighting="off",
+    small_candidate_order="normal",
+    objective="risk",
+    csv_path=None,
+    force=False,
+    only_patterns=None,
+    max_patterns=None,
+    only_worst_patterns=None,
+    min_candidates=1,
+    max_second_guesses=None,
+    second_guess_candidates="all",
+):
+    validate_tune_pattern(first_guess, "." * len(first_guess), strategy, allowed_guesses)
+    selected_patterns = select_second_map_patterns(
+        first_guess,
+        strategy,
+        allowed_guesses,
+        possible_answers,
+        second_guess_pool_name,
+        trap_threshold,
+        answer_weighting,
+        small_candidate_order,
+        only_patterns=only_patterns,
+        max_patterns=max_patterns,
+        only_worst_patterns=only_worst_patterns,
+        min_candidates=min_candidates,
+    )
+    completed_patterns = set()
+    writer_context = None
+    if csv_path:
+        if not force:
+            completed_patterns = read_completed_built_second_map_patterns(
+                csv_path,
+                first_guess,
+            )
+        writer_context = open_incremental_built_second_map_csv(csv_path, force=force)
+
+    rows = []
+    total_patterns = len(selected_patterns)
+    total_start = time.perf_counter()
+    try:
+        csv_file = None
+        writer = None
+        if writer_context is not None:
+            csv_file, writer = writer_context
+        for index, (pattern, candidates) in enumerate(selected_patterns, start=1):
+            if pattern in completed_patterns:
+                print(
+                    f"Skipped {index}/{total_patterns} pattern {pattern} "
+                    f"({len(candidates)} candidates): already complete"
+                )
+                continue
+            pattern_start = time.perf_counter()
+            row = build_second_map_row_for_pattern(
+                first_guess,
+                pattern,
+                strategy,
+                allowed_guesses,
+                possible_answers,
+                second_guess_pool,
+                trap_threshold,
+                answer_weighting,
+                small_candidate_order,
+                objective,
+                max_second_guesses=max_second_guesses,
+                second_guess_candidates=second_guess_candidates,
+                show_progress=True,
+            )
+            rows.append(row)
+            if writer is not None:
+                writer.writerow(row)
+                csv_file.flush()
+            pattern_elapsed = time.perf_counter() - pattern_start
+            total_elapsed = time.perf_counter() - total_start
+            print(
+                f"Built {index}/{total_patterns} pattern {pattern} "
+                f"({len(candidates)} candidates): best {row['best_second']} "
+                f"in {pattern_elapsed:.2f}s; total {total_elapsed:.2f}s"
+            )
+    finally:
+        if writer_context is not None:
+            writer_context[0].close()
+    return tuple(rows)
+
+
+def first_pattern_candidate_groups(first_guess, possible_answers):
+    grouped_answers = defaultdict(list)
+    for answer in possible_answers:
+        grouped_answers[score_guess(first_guess, answer)].append(answer)
+    return tuple(
+        (pattern, tuple(answers))
+        for pattern, answers in sorted(grouped_answers.items())
+    )
+
+
+def select_second_map_patterns(
+    first_guess,
+    strategy,
+    allowed_guesses,
+    possible_answers,
+    second_guess_pool_name,
+    trap_threshold,
+    answer_weighting,
+    small_candidate_order,
+    only_patterns=None,
+    max_patterns=None,
+    only_worst_patterns=None,
+    min_candidates=1,
+):
+    groups = list(first_pattern_candidate_groups(first_guess, possible_answers))
+    if only_patterns:
+        requested_patterns = set(only_patterns)
+        groups = [(pattern, candidates) for pattern, candidates in groups if pattern in requested_patterns]
+    if only_worst_patterns:
+        _row, games = build_strategy_result(
+            strategy,
+            first_guess,
+            allowed_guesses,
+            possible_answers,
+            second_guess_pool_name=second_guess_pool_name,
+            trap_threshold=trap_threshold,
+            answer_weighting=answer_weighting,
+            small_candidate_order=small_candidate_order,
+            use_overrides=None,
+        )
+        worst_patterns = {
+            row["pattern"]
+            for row in build_worst_pattern_rows(games, only_worst_patterns)
+        }
+        groups = [(pattern, candidates) for pattern, candidates in groups if pattern in worst_patterns]
+    groups = [
+        (pattern, candidates)
+        for pattern, candidates in groups
+        if len(candidates) >= min_candidates
+    ]
+    if max_patterns is not None:
+        groups = groups[:max_patterns]
+    return tuple(groups)
+
+
+def build_second_map_row_for_pattern(
+    first_guess,
+    pattern,
+    strategy,
+    allowed_guesses,
+    possible_answers,
+    second_guess_pool,
+    trap_threshold=2,
+    answer_weighting="off",
+    small_candidate_order="normal",
+    objective="risk",
+    max_second_guesses=None,
+    second_guess_candidates="all",
+    show_progress=False,
+):
+    candidates = tuple(
+        answer for answer in possible_answers if score_guess(first_guess, answer) == pattern
+    )
+    if not candidates:
+        raise ValueError(f"No answers match first guess {first_guess!r} and pattern {pattern!r}.")
+    selected_second_guesses = select_second_guess_candidates(
+        second_guess_pool,
+        candidates,
+        max_second_guesses=max_second_guesses,
+        mode=second_guess_candidates,
+    )
+    if not selected_second_guesses:
+        raise ValueError(f"No second-map row could be built for pattern {pattern!r}.")
+    best_row = None
+    best_rank = None
+    pattern_start = time.perf_counter()
+    total_second_guesses = len(selected_second_guesses)
+    for index, current_second_guess in enumerate(selected_second_guesses, start=1):
+        games = tuple(
+            play_tuned_pattern_game(
+                answer,
+                allowed_guesses,
+                candidates,
+                first_guess,
+                pattern,
+                current_second_guess,
+                strategy,
+                second_guess_pool,
+                trap_threshold,
+                answer_weighting,
+                small_candidate_order,
+            )
+            for answer in candidates
+        )
+        row = build_tune_pattern_row(
+            pattern,
+            current_second_guess,
+            len(candidates),
+            games,
+            candidates,
+            branch_summary=True,
+        )
+        rank = tune_pattern_objective_rank(row, objective)
+        if best_rank is None or rank < best_rank:
+            best_row = row
+            best_rank = rank
+        if show_progress and (index % 100 == 0 or index == total_second_guesses):
+            elapsed = time.perf_counter() - pattern_start
+            print(
+                f"Pattern {pattern} ({len(candidates)} candidates): "
+                f"evaluated {index}/{total_second_guesses} second guesses; "
+                f"current best {best_row['second_guess']} risk {best_row['risk_score']}; "
+                f"elapsed {elapsed:.2f}s"
+            )
+    return format_built_second_map_row(first_guess, best_row)
+
+
+def select_second_guess_candidates(
+    second_guess_pool,
+    candidates,
+    max_second_guesses=None,
+    mode="all",
+):
+    if mode == "all":
+        selected = tuple(second_guess_pool)
+    elif mode == "top":
+        selected = tuple(
+            sorted(
+                second_guess_pool,
+                key=lambda guess: second_guess_candidate_rank(guess, candidates),
+            )
+        )
+    else:
+        raise ValueError(f"Unsupported second-guess candidate mode: {mode}")
+    if max_second_guesses is not None:
+        selected = selected[:max_second_guesses]
+    return selected
+
+
+def second_guess_candidate_rank(guess, candidates):
+    target_letters = set("".join(candidates))
+    coverage = len(set(guess) & target_letters)
+    unique_letters = len(set(guess))
+    common_score = sum(1 for letter in set(guess) if letter in "etaoinshrldcu")
+    is_not_candidate = guess not in set(candidates)
+    return (-coverage, -unique_letters, is_not_candidate, -common_score, guess)
+
+
+def format_built_second_map_row(first_guess, tune_row):
+    return {
+        "first": first_guess,
+        "pattern": tune_row["pattern"],
+        "candidates": tune_row["candidates"],
+        "best_second": tune_row["second_guess"],
+        "average": tune_row["average"],
+        "solved_3_or_less": tune_row["solved_3_or_less"],
+        "solved_4_or_less": tune_row["solved_4_or_less"],
+        "fives": tune_row["fives"],
+        "sixes": tune_row["sixes"],
+        "failed": tune_row["failed"],
+        "risk_score": tune_row["risk_score"],
+        "worst_branch_pattern": tune_row["worst_branch_pattern"],
+        "worst_branch_candidates": tune_row["worst_branch_candidates"],
+        "worst_branch_fives": tune_row["worst_branch_fives"],
+        "worst_branch_risk": tune_row["worst_branch_risk"],
+    }
+
+
+def load_built_second_map(path, first_guess, second_guess_pool):
+    csv_path = Path(path)
+    if not csv_path.exists():
+        raise ValueError(f"Built second map file not found: {csv_path}")
+
+    pool = set(second_guess_pool)
+    required_columns = {"first", "pattern", "best_second"}
+    second_guess_by_pattern = {}
+    with csv_path.open(newline="", encoding="utf-8") as csv_file:
+        reader = csv.DictReader(csv_file)
+        if reader.fieldnames is None or not required_columns.issubset(reader.fieldnames):
+            raise ValueError(
+                "Built second map CSV must include first, pattern, and best_second columns."
+            )
+        for row in reader:
+            if row["first"] != first_guess:
+                continue
+            pattern = row["pattern"]
+            best_second = row["best_second"]
+            if len(pattern) != len(first_guess) or any(mark not in "GY." for mark in pattern):
+                raise ValueError(f"Invalid pattern {pattern!r} in built second map.")
+            if best_second not in pool:
+                raise ValueError(
+                    f"Built map second guess {best_second!r} is not in the selected second-guess pool."
+                )
+            second_guess_by_pattern[pattern] = best_second
+    if not second_guess_by_pattern:
+        raise ValueError(f"No rows for first guess {first_guess!r} in built second map.")
+    return second_guess_by_pattern
+
+
+def validate_second_guess_map_patterns(first_guess, possible_answers, second_guess_by_pattern):
+    missing_patterns = sorted(
+        {
+            score_guess(first_guess, answer)
+            for answer in possible_answers
+            if score_guess(first_guess, answer) not in second_guess_by_pattern
+        }
+    )
+    if missing_patterns:
+        shown = ", ".join(missing_patterns[:5])
+        raise ValueError(f"Built second map is missing first-feedback pattern(s): {shown}")
 
 
 def validate_tune_pattern(first_guess, pattern, strategy, allowed_guesses):
@@ -1159,6 +1623,31 @@ def print_tune_pattern_report(rows, branch_summary=False):
                 f"{row['worst_branch_risk']}"
             )
         print(line)
+
+
+def print_built_second_map(rows):
+    print(
+        "First  Pattern  Candidates  Best2  Avg   <=3   <=4   5s  6s  Fail  Risk  "
+        "Worst2  WorstN  Worst5s  WorstRisk"
+    )
+    for row in rows:
+        print(
+            f"{row['first']:<6} "
+            f"{row['pattern']:<8} "
+            f"{row['candidates']:<11} "
+            f"{row['best_second']:<6} "
+            f"{row['average']:<5} "
+            f"{row['solved_3_or_less']:<5} "
+            f"{row['solved_4_or_less']:<5} "
+            f"{row['fives']:<3} "
+            f"{row['sixes']:<3} "
+            f"{row['failed']:<5} "
+            f"{row['risk_score']:<5} "
+            f"{row['worst_branch_pattern']:<7} "
+            f"{row['worst_branch_candidates']:<7} "
+            f"{row['worst_branch_fives']:<8} "
+            f"{row['worst_branch_risk']}"
+        )
 
 
 def build_tune_branch_result(
@@ -1819,6 +2308,7 @@ def build_strategy_result(
     expected_depth=2,
     final_cluster_overrides="off",
     final_cluster_override_changes=None,
+    built_second_map_path=None,
 ):
     if first_guess not in allowed_guesses:
         raise ValueError(f"First guess {first_guess!r} is not in the allowed guess list.")
@@ -1874,22 +2364,34 @@ def build_strategy_result(
         second_guess_pool = (
             allowed_guesses if second_guess_pool_name == "allowed" else possible_answers
         )
-        second_guess_rows = build_second_guess_map_rows(
-            first_guess,
-            allowed_guesses,
-            possible_answers,
-            second_guess_pool=second_guess_pool,
-        )
-        second_guess_by_pattern = {
-            row["pattern"]: row["best_balanced"] for row in second_guess_rows
-        }
-        if effective_use_overrides:
-            apply_second_guess_overrides(
+        if built_second_map_path:
+            second_guess_by_pattern = load_built_second_map(
+                built_second_map_path,
                 first_guess,
-                second_guess_pool_name,
                 second_guess_pool,
+            )
+            validate_second_guess_map_patterns(
+                first_guess,
+                possible_answers,
                 second_guess_by_pattern,
             )
+        else:
+            second_guess_rows = build_second_guess_map_rows(
+                first_guess,
+                allowed_guesses,
+                possible_answers,
+                second_guess_pool=second_guess_pool,
+            )
+            second_guess_by_pattern = {
+                row["pattern"]: row["best_balanced"] for row in second_guess_rows
+            }
+            if effective_use_overrides:
+                apply_second_guess_overrides(
+                    first_guess,
+                    second_guess_pool_name,
+                    second_guess_pool,
+                    second_guess_by_pattern,
+                )
         expected_optimizer = None
         if strategy == "second-map-expected":
             expected_optimizer = ExpectedValueOptimizer(
@@ -3188,6 +3690,50 @@ def write_opener_strategy_csv(path, rows):
         writer = csv.DictWriter(csv_file, fieldnames=OPENER_STRATEGY_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_built_second_map_csv(path, rows):
+    csv_path = Path(path)
+    if csv_path.parent != Path("."):
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=BUILT_SECOND_MAP_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def read_completed_built_second_map_patterns(path, first_guess):
+    csv_path = Path(path)
+    if not csv_path.exists():
+        return set()
+    with csv_path.open(newline="", encoding="utf-8") as csv_file:
+        reader = csv.DictReader(csv_file)
+        if reader.fieldnames is None:
+            return set()
+        if not {"first", "pattern"}.issubset(reader.fieldnames):
+            raise ValueError(
+                "Existing built second map CSV must include first and pattern columns."
+            )
+        return {
+            row["pattern"]
+            for row in reader
+            if row.get("first") == first_guess and row.get("pattern")
+        }
+
+
+def open_incremental_built_second_map_csv(path, force=False):
+    csv_path = Path(path)
+    if csv_path.parent != Path("."):
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = force or not csv_path.exists() or csv_path.stat().st_size == 0
+    mode = "w" if force else "a"
+    csv_file = csv_path.open(mode, newline="", encoding="utf-8")
+    writer = csv.DictWriter(csv_file, fieldnames=BUILT_SECOND_MAP_COLUMNS)
+    if write_header:
+        writer.writeheader()
+        csv_file.flush()
+    return csv_file, writer
 
 
 def write_tune_pattern_csv(path, rows):
