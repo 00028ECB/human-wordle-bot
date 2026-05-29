@@ -11,6 +11,138 @@ This first version is intentionally simple:
 
 No web app, network access, packages, API keys, or secrets are needed.
 
+## Current Champions
+
+### Pure Mode Champion
+
+Purpose: uniform benchmark across all 2,315 answer words. Every answer counts equally.
+
+Current command:
+
+```bash
+python -m src.wordle_lab \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --strategy second-map-bucket \
+  --first slate \
+  --second-guess-pool answers \
+  --worst-patterns 25
+```
+
+Current result:
+
+```text
+Strategy: second-map-bucket
+First: slate
+Pool: answers
+Tested: 2315
+Solved: 2315
+Average: 3.47
+<=3: 1175
+<=4: 2276
+5s: 39
+6s: 0
+Failed: 0
+Risk: 78
+```
+
+Notes: this is the clean mathematical benchmark mode. It does not use prior-answer history or dated weighting.
+
+### Human Mode Champion
+
+Purpose: real-world daily-play mode. Uses dated prior-answer history, recency weighting, Human Mode overrides, and streak-safe bucket logic.
+
+Current command:
+
+```bash
+python -m src.wordle_lab \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --strategy second-map-bucket \
+  --first slate \
+  --second-guess-pool answers \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --prior-policy downweight \
+  --as-of-date 2026-05-28 \
+  --show-weighted-score \
+  --weighted-worst-patterns 25
+```
+
+Current weighted result:
+
+```text
+Strategy: second-map-bucket
+First: slate
+Pool: answers
+Total weight: 1363.00
+Weighted average guesses: 3.43
+Weighted <=3: 737.85
+Weighted <=4: 1345.20
+Weighted 5s: 17.80
+Weighted 6s: 0.00
+Weighted failed: 0.00
+```
+
+Ordinary uniform report shown during Human Mode:
+
+```text
+Tested: 2315
+Solved: 2315
+Average: 3.47
+<=3: 1177
+<=4: 2275
+5s: 40
+6s: 0
+Failed: 0
+Risk: 80
+```
+
+The uniform line may look slightly worse than Pure Mode because Human Mode is intentionally optimizing weighted real-world play, not the pure equal-answer benchmark.
+
+Human Mode currently uses these human-specific pattern overrides:
+
+```text
+slate ....Y -> drown
+slate ..YY. -> hound
+slate ..Y.Y -> began
+```
+
+Pure Mode keeps its own pure overrides, for example:
+
+```text
+slate ....Y -> rocky
+```
+
+### Daily Use
+
+Human Mode:
+
+```bash
+python -m src.wordle_lab --human-recommend slate ....Y
+```
+
+Pure Mode:
+
+```bash
+python -m src.wordle_lab --pure-recommend slate ....Y
+```
+
+Deeper Human Mode example:
+
+```bash
+python -m src.wordle_lab --human-recommend slate ....Y drown .Y...
+```
+
+Expected examples:
+
+```text
+Human slate ....Y recommends drown.
+Pure slate ....Y recommends rocky.
+Human slate ....Y drown .Y... recommends furry.
+```
+
+Pure Mode is for fair mathematical comparison. Human Mode is for real-world daily play. Wordle now allows repeats, so Human Mode uses downweighting rather than treating prior answers as impossible. `--prior-policy exclude` is diagnostic, not the preferred real-world mode.
+
 ## Project Structure
 
 ```text
