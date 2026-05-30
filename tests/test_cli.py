@@ -19,6 +19,7 @@ from src.wordle_lab.__main__ import (
     TUNE_PATH_BRANCH_COLUMNS,
     WORST_GAME_COLUMNS,
     PRIOR_WEIGHT_PRESETS,
+    PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS,
     apply_second_guess_overrides,
     answer_likelihood_score,
     apply_prior_policy_to_candidates,
@@ -27,7 +28,12 @@ from src.wordle_lab.__main__ import (
     build_comparison_row,
     build_prior_dated_stats,
     build_prior_answer_weights,
+    build_prior_answer_weights_for_schedule,
     build_prior_weight_preset_comparison_rows,
+    build_prior_weight_schedule_search_rows,
+    build_prior_weight_schedule_result_cache,
+    build_valid_prior_weight_schedules,
+    build_weighted_score_row_from_cached_results,
     build_prior_weight_stats,
     build_recommendation,
     build_weighted_score_row,
@@ -77,8 +83,11 @@ from src.wordle_lab.__main__ import (
     load_dated_prior_answers,
     load_built_second_map,
     open_incremental_built_second_map_csv,
+    open_incremental_prior_weight_schedule_search_csv,
     main,
     parse_human_overrides,
+    parse_float_values,
+    parse_prior_weight_values,
     play_baseline_game,
     play_second_map_game,
     print_built_second_map,
@@ -90,6 +99,7 @@ from src.wordle_lab.__main__ import (
     print_prior_dated_stats_report,
     print_prior_weight_stats_report,
     print_prior_weight_preset_comparison,
+    print_prior_weight_schedule_search,
     print_prior_weighting_changes,
     print_recommendation,
     print_weighted_score_report,
@@ -102,8 +112,10 @@ from src.wordle_lab.__main__ import (
     prior_answer_weight_for_age,
     prior_safe_answer_rank,
     prior_weight_for_word,
+    resolve_prior_weight_schedule,
     resolve_as_of_date,
     read_completed_built_second_map_patterns,
+    read_prior_weight_schedule_search_rows,
     run_build_second_map,
     second_guess_candidate_rank,
     select_second_map_patterns,
@@ -121,6 +133,7 @@ from src.wordle_lab.__main__ import (
     write_tune_path_csv,
     write_tune_pattern_csv,
     write_prior_weight_preset_comparison_csv,
+    write_prior_weight_schedule_search_csv,
 )
 from src.wordle_lab.scoring import score_guess
 from src.wordle_lab.simulator import GameResult, run_simulation
@@ -227,6 +240,24 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.prior_weight_preset, "conservative")
 
+    def test_parser_accepts_prior_weight_values(self):
+        args = build_parser().parse_args(
+            [
+                "--strategy",
+                "baseline",
+                "--prior-policy",
+                "downweight",
+                "--prior-weight-values",
+                "0.005,0.05,0.15,0.35",
+            ]
+        )
+
+        self.assertEqual(args.prior_weight_values, "0.005,0.05,0.15,0.35")
+
+    def test_prior_weight_values_requires_downweight_policy(self):
+        with self.assertRaises(SystemExit):
+            main(["--prior-weight-values", "0.005,0.05,0.15,0.35"])
+
     def test_parser_accepts_repeated_human_overrides(self):
         args = build_parser().parse_args(
             [
@@ -252,6 +283,27 @@ class CliTests(unittest.TestCase):
         args = build_parser().parse_args(["--compare-prior-weight-presets"])
 
         self.assertTrue(args.compare_prior_weight_presets)
+
+    def test_parser_accepts_prior_weight_schedule_search_options(self):
+        args = build_parser().parse_args(
+            [
+                "--search-prior-weight-schedules",
+                "--weight-90",
+                "0.01,0.02",
+                "--weight-365",
+                "0.10",
+                "--weight-730",
+                "0.25",
+                "--weight-old",
+                "0.50",
+                "--decision-weight-preset",
+                "aggressive",
+            ]
+        )
+
+        self.assertTrue(args.search_prior_weight_schedules)
+        self.assertEqual(args.weight_90, "0.01,0.02")
+        self.assertEqual(args.decision_weight_preset, "aggressive")
 
     def test_parser_accepts_show_weighted_score(self):
         args = build_parser().parse_args(["--strategy", "baseline", "--show-weighted-score"])
@@ -921,6 +973,47 @@ class CliTests(unittest.TestCase):
         self.assertEqual(weights["petal"], 0.50)
         self.assertEqual(weights["raise"], 0.75)
 
+    def test_build_prior_answer_weights_for_custom_schedule(self):
+        weights = build_prior_answer_weights_for_schedule(
+            ((date(2025, 9, 1), "cigar"), (date(2024, 8, 31), "petal")),
+            date(2025, 9, 1),
+            {"0-90": 0.03, "91-365": 0.12, "366-730": 0.31, "730+": 0.52, "never": 1.0},
+            fallback_prior_answers=("raise",),
+        )
+
+        self.assertEqual(weights["cigar"], 0.03)
+        self.assertEqual(weights["petal"], 0.31)
+        self.assertEqual(weights["raise"], 0.52)
+
+    def test_parse_float_values_rejects_bad_values(self):
+        self.assertEqual(parse_float_values("0.01,0.10", "--weight-90"), (0.01, 0.10))
+        with self.assertRaises(ValueError):
+            parse_float_values("0.01,nope", "--weight-90")
+        with self.assertRaises(ValueError):
+            parse_float_values("1.25", "--weight-90")
+
+    def test_parse_prior_weight_values_builds_custom_schedule(self):
+        schedule = parse_prior_weight_values("0.005,0.05,0.15,0.35")
+
+        self.assertEqual(schedule["0-90"], 0.005)
+        self.assertEqual(schedule["91-365"], 0.05)
+        self.assertEqual(schedule["366-730"], 0.15)
+        self.assertEqual(schedule["730+"], 0.35)
+        self.assertEqual(schedule["never"], 1.0)
+
+    def test_parse_prior_weight_values_rejects_non_monotonic_values(self):
+        with self.assertRaises(ValueError):
+            parse_prior_weight_values("0.10,0.05,0.15,0.35")
+
+    def test_resolve_prior_weight_schedule_prefers_custom_values(self):
+        schedule, label = resolve_prior_weight_schedule(
+            "aggressive",
+            "0.005,0.05,0.15,0.35",
+        )
+
+        self.assertEqual(label, "custom")
+        self.assertEqual(schedule["0-90"], 0.005)
+
     def test_build_prior_weight_stats_counts_answer_buckets(self):
         weights = {"cigar": 0.05, "petal": 0.60}
 
@@ -988,11 +1081,13 @@ class CliTests(unittest.TestCase):
                     "weighted_fives": 0.0,
                     "weighted_sixes": 0.0,
                     "weighted_failed": 1.0,
-                }
+                },
+                schedule_label="custom",
             )
 
         report = output.getvalue()
         self.assertIn("Weighted human-mode score:", report)
+        self.assertIn("Prior weight schedule: custom", report)
         self.assertIn("Total weight: 1.65", report)
         self.assertIn("Weighted average guesses: 2.9700", report)
 
@@ -1049,6 +1144,26 @@ class CliTests(unittest.TestCase):
 
         self.assertRegex(rows[0]["weighted_average"], r"^\d+\.\d{3}$")
 
+    def test_build_prior_weight_preset_comparison_rows_includes_custom_schedule(self):
+        rows = build_prior_weight_preset_comparison_rows(
+            ("cigar", "rebut", "sissy"),
+            ("cigar", "rebut", "sissy"),
+            ((date(2026, 5, 28), "cigar"),),
+            date(2026, 5, 28),
+            strategy="second-map-bucket",
+            first_guess="cigar",
+            second_guess_pool_name="answers",
+            custom_schedule={
+                "0-90": 0.005,
+                "91-365": 0.05,
+                "366-730": 0.15,
+                "730+": 0.35,
+                "never": 1.0,
+            },
+        )
+
+        self.assertEqual(rows[-1]["preset"], "custom")
+
     def test_print_prior_weight_preset_comparison_outputs_table(self):
         output = io.StringIO()
 
@@ -1073,6 +1188,118 @@ class CliTests(unittest.TestCase):
         self.assertIn("Prior weight preset comparison:", report)
         self.assertIn("weighted_average", report)
         self.assertIn("current", report)
+
+    def test_build_prior_weight_schedule_search_rows_filters_and_sorts_schedules(self):
+        rows = build_prior_weight_schedule_search_rows(
+            ("cigar", "rebut", "sissy"),
+            ("cigar", "rebut", "sissy"),
+            ((date(2026, 5, 28), "cigar"), (date(2025, 4, 24), "rebut")),
+            date(2026, 5, 28),
+            strategy="second-map-bucket",
+            first_guess="cigar",
+            second_guess_pool_name="answers",
+            weight_90_values=(0.01, 0.30),
+            weight_365_values=(0.10,),
+            weight_730_values=(0.25,),
+            weight_old_values=(0.50,),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["weight_90"], "0.010")
+        self.assertEqual(rows[0]["weight_365"], "0.100")
+        self.assertIn("weighted_average", rows[0])
+        self.assertRegex(rows[0]["weighted_average"], r"^\d+\.\d{4}$")
+
+    def test_prior_weight_schedule_search_keeps_tiny_weights_distinct(self):
+        rows = build_prior_weight_schedule_search_rows(
+            ("cigar", "rebut", "sissy"),
+            ("cigar", "rebut", "sissy"),
+            ((date(2026, 5, 28), "cigar"),),
+            date(2026, 5, 28),
+            strategy="second-map-bucket",
+            first_guess="cigar",
+            second_guess_pool_name="answers",
+            weight_90_values=(0.005, 0.01),
+            weight_365_values=(0.10,),
+            weight_730_values=(0.25,),
+            weight_old_values=(0.50,),
+        )
+        weight_90_values = {row["weight_90"] for row in rows}
+
+        self.assertEqual(weight_90_values, {"0.005", "0.010"})
+
+    def test_schedule_search_cache_records_age_buckets(self):
+        games = (
+            GameResult(answer="cigar", guesses=("cigar",), solved=True),
+            GameResult(answer="rebut", guesses=("cigar", "rebut"), solved=True),
+            GameResult(answer="sissy", guesses=("cigar", "rebut", "sissy"), solved=True),
+        )
+
+        cached = build_prior_weight_schedule_result_cache(
+            games,
+            ((date(2026, 5, 28), "cigar"), (date(2025, 4, 24), "rebut")),
+            date(2026, 5, 28),
+        )
+        buckets = {row["answer"]: row["age_bucket"] for row in cached}
+
+        self.assertEqual(buckets["cigar"], "0_90")
+        self.assertEqual(buckets["rebut"], "366_730")
+        self.assertEqual(buckets["sissy"], "never")
+
+    def test_weighted_score_from_cached_results_uses_schedule(self):
+        cached = (
+            {"answer": "cigar", "guesses": 2, "solved": True, "age_bucket": "0_90"},
+            {"answer": "rebut", "guesses": 5, "solved": True, "age_bucket": "366_730"},
+            {"answer": "sissy", "guesses": 6, "solved": False, "age_bucket": "never"},
+        )
+
+        row = build_weighted_score_row_from_cached_results(
+            cached,
+            {"0-90": 0.01, "91-365": 0.10, "366-730": 0.25, "730+": 0.50, "never": 1.0},
+        )
+
+        self.assertAlmostEqual(row["total_weight"], 1.26)
+        self.assertAlmostEqual(row["weighted_fives"], 0.25)
+        self.assertAlmostEqual(row["weighted_failed"], 1.0)
+
+    def test_build_valid_prior_weight_schedules_filters_non_monotonic(self):
+        schedules = build_valid_prior_weight_schedules(
+            (0.01, 0.30),
+            (0.10,),
+            (0.25,),
+            (0.50,),
+        )
+
+        self.assertEqual(len(schedules), 1)
+        self.assertEqual(schedules[0]["0-90"], 0.01)
+
+    def test_print_prior_weight_schedule_search_outputs_table(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_prior_weight_schedule_search(
+                (
+                    {
+                        "weight_90": "0.010",
+                        "weight_365": "0.100",
+                        "weight_730": "0.250",
+                        "weight_old": "0.500",
+                        "total_weight": "1.35",
+                        "weighted_average": "2.0000",
+                        "weighted_<=3": "1.35",
+                        "weighted_<=4": "1.35",
+                        "weighted_5s": "0.00",
+                        "weighted_6s": "0.00",
+                        "weighted_failed": "0.00",
+                        "weighted_risk": "0.00",
+                    },
+                )
+            )
+
+        report = output.getvalue()
+        self.assertIn("Prior weight schedule search:", report)
+        self.assertIn("weight_90", report)
+        self.assertIn("weighted_average", report)
 
     def test_main_compares_prior_weight_presets_for_custom_word_lists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1121,6 +1348,176 @@ class CliTests(unittest.TestCase):
             self.assertIn("Prior weight preset comparison:", report)
             self.assertIn("repeat-friendly", report)
             self.assertIn("weighted_<=3", csv_text)
+
+    def test_main_compare_prior_weight_presets_includes_custom_schedule(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_path = temp_path / "prior.txt"
+            dated_path = temp_path / "prior_dated.csv"
+            answers_path.write_text("cigar\nrebut\nsissy\n", encoding="utf-8")
+            allowed_path.write_text("cigar\nrebut\nsissy\n", encoding="utf-8")
+            prior_path.write_text("", encoding="utf-8")
+            dated_path.write_text("date,word\n2026-05-28,cigar\n", encoding="utf-8")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main([
+                    "--compare-prior-weight-presets",
+                    "--answers",
+                    str(answers_path),
+                    "--allowed",
+                    str(allowed_path),
+                    "--prior-answers",
+                    str(prior_path),
+                    "--prior-answers-dated",
+                    str(dated_path),
+                    "--prior-policy",
+                    "downweight",
+                    "--prior-weight-values",
+                    "0.005,0.05,0.15,0.35",
+                    "--strategy",
+                    "second-map-bucket",
+                    "--first",
+                    "cigar",
+                    "--second-guess-pool",
+                    "answers",
+                    "--as-of-date",
+                    "2026-05-28",
+                ])
+
+            report = output.getvalue()
+            self.assertIn("custom", report)
+
+
+    def test_main_searches_prior_weight_schedules_for_custom_word_lists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_path = temp_path / "prior.txt"
+            dated_path = temp_path / "prior_dated.csv"
+            csv_path = temp_path / "results" / "schedule_search.csv"
+            answers_path.write_text("cigar\nrebut\nsissy\n", encoding="utf-8")
+            allowed_path.write_text("cigar\nrebut\nsissy\n", encoding="utf-8")
+            prior_path.write_text("", encoding="utf-8")
+            dated_path.write_text(
+                "date,word\n2026-05-28,cigar\n2025-04-24,rebut\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main([
+                    "--search-prior-weight-schedules",
+                    "--answers",
+                    str(answers_path),
+                    "--allowed",
+                    str(allowed_path),
+                    "--prior-answers",
+                    str(prior_path),
+                    "--prior-answers-dated",
+                    str(dated_path),
+                    "--prior-policy",
+                    "downweight",
+                    "--strategy",
+                    "second-map-bucket",
+                    "--first",
+                    "cigar",
+                    "--second-guess-pool",
+                    "answers",
+                    "--as-of-date",
+                    "2026-05-28",
+                    "--weight-90",
+                    "0.01,0.30",
+                    "--weight-365",
+                    "0.10",
+                    "--weight-730",
+                    "0.25",
+                    "--weight-old",
+                    "0.50",
+                    "--top",
+                    "1",
+                    "--csv",
+                    str(csv_path),
+                ])
+
+            report = output.getvalue()
+            csv_text = csv_path.read_text(encoding="utf-8")
+            self.assertIn("Running strategy once to cache per-answer results...", report)
+            self.assertIn("Cached 3 answer results.", report)
+            self.assertIn("Scoring 1 schedules...", report)
+            self.assertIn(
+                "Schedule search scores weight schedules against fixed strategy decisions from schedule: current.",
+                report,
+            )
+            self.assertIn("Prior weight schedule search:", report)
+            self.assertIn("0.010", report)
+            self.assertNotIn("0.300", report)
+            self.assertIn(",".join(PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS), csv_text)
+
+    def test_main_search_prior_weight_schedules_resumes_existing_csv(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_path = temp_path / "prior.txt"
+            dated_path = temp_path / "prior_dated.csv"
+            csv_path = temp_path / "results" / "schedule_search.csv"
+            answers_path.write_text("cigar\nrebut\nsissy\n", encoding="utf-8")
+            allowed_path.write_text("cigar\nrebut\nsissy\n", encoding="utf-8")
+            prior_path.write_text("", encoding="utf-8")
+            dated_path.write_text(
+                "date,word\n2026-05-28,cigar\n2025-04-24,rebut\n",
+                encoding="utf-8",
+            )
+            csv_path.parent.mkdir(parents=True)
+            csv_path.write_text(
+                ",".join(PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS)
+                + "\n0.01,0.10,0.25,0.50,1.35,2.0000,1.35,1.35,0.00,0.00,0.00,0.00\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main([
+                    "--search-prior-weight-schedules",
+                    "--answers",
+                    str(answers_path),
+                    "--allowed",
+                    str(allowed_path),
+                    "--prior-answers",
+                    str(prior_path),
+                    "--prior-answers-dated",
+                    str(dated_path),
+                    "--prior-policy",
+                    "downweight",
+                    "--strategy",
+                    "second-map-bucket",
+                    "--first",
+                    "cigar",
+                    "--second-guess-pool",
+                    "answers",
+                    "--as-of-date",
+                    "2026-05-28",
+                    "--weight-90",
+                    "0.01,0.02",
+                    "--weight-365",
+                    "0.10",
+                    "--weight-730",
+                    "0.25",
+                    "--weight-old",
+                    "0.50",
+                    "--csv",
+                    str(csv_path),
+                ])
+
+            report = output.getvalue()
+            csv_lines = csv_path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertIn("Scoring 1 schedules...", report)
+            self.assertEqual(len(csv_lines), 3)
+            self.assertTrue(any(line.startswith("0.020,") for line in csv_lines))
 
     def test_print_prior_dated_stats_report_outputs_counts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5619,6 +6016,60 @@ class CliTests(unittest.TestCase):
         self.assertIn(",".join(TUNE_PATH_BRANCH_COLUMNS), csv_text)
         self.assertIn("worst_branch_pattern", csv_text)
 
+    def test_write_prior_weight_schedule_search_csv_creates_parent_folder(self):
+        rows = (
+            {
+                "weight_90": "0.010",
+                "weight_365": "0.100",
+                "weight_730": "0.250",
+                "weight_old": "0.500",
+                "total_weight": "1.35",
+                "weighted_average": "2.0000",
+                "weighted_<=3": "1.35",
+                "weighted_<=4": "1.35",
+                "weighted_5s": "0.00",
+                "weighted_6s": "0.00",
+                "weighted_failed": "0.00",
+                "weighted_risk": "0.00",
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "results" / "schedule_search.csv"
+
+            write_prior_weight_schedule_search_csv(path, rows)
+
+            csv_text = path.read_text(encoding="utf-8")
+
+        self.assertIn(",".join(PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS), csv_text)
+        self.assertIn("0.010,0.100,0.250,0.500", csv_text)
+
+    def test_open_incremental_prior_weight_schedule_search_csv_writes_header_immediately(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "results" / "schedule_search.csv"
+
+            csv_file, _writer = open_incremental_prior_weight_schedule_search_csv(path)
+            try:
+                csv_text = path.read_text(encoding="utf-8")
+            finally:
+                csv_file.close()
+
+        self.assertIn(",".join(PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS), csv_text)
+
+    def test_read_prior_weight_schedule_search_rows_reads_existing_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "schedule_search.csv"
+            path.write_text(
+                ",".join(PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS)
+                + "\n0.01,0.10,0.25,0.50,1.35,2.0000,1.35,1.35,0.00,0.00,0.00,0.00\n",
+                encoding="utf-8",
+            )
+
+            rows = read_prior_weight_schedule_search_rows(path)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["weight_90"], "0.01")
+
     def test_main_uses_custom_word_list_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -5776,6 +6227,43 @@ class CliTests(unittest.TestCase):
                         "weighted-risk",
                     ]
                 )
+
+    def test_search_prior_weight_schedules_requires_downweight_policy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_path = temp_path / "prior.txt"
+            dated_path = temp_path / "prior_dated.csv"
+            answers_path.write_text("cigar\nrebut\n", encoding="utf-8")
+            allowed_path.write_text("cigar\nrebut\n", encoding="utf-8")
+            prior_path.write_text("", encoding="utf-8")
+            dated_path.write_text("date,word\n2026-05-28,cigar\n", encoding="utf-8")
+
+            with self.assertRaises(SystemExit):
+                main([
+                    "--search-prior-weight-schedules",
+                    "--answers",
+                    str(answers_path),
+                    "--allowed",
+                    str(allowed_path),
+                    "--prior-answers",
+                    str(prior_path),
+                    "--prior-answers-dated",
+                    str(dated_path),
+                    "--weight-90",
+                    "0.01",
+                    "--weight-365",
+                    "0.10",
+                    "--weight-730",
+                    "0.25",
+                    "--weight-old",
+                    "0.50",
+                ])
+
+    def test_search_prior_weight_schedules_requires_weight_values(self):
+        with self.assertRaises(SystemExit):
+            main(["--search-prior-weight-schedules"])
 
     def test_trap_threshold_requires_positive_limit(self):
         with self.assertRaises(SystemExit):

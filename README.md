@@ -483,6 +483,22 @@ aggressive       0.02  0.10    0.25     0.50  1.00
 repeat-friendly  0.15  0.35    0.60     0.85  1.00
 ```
 
+You can also provide a one-off custom schedule:
+
+```bash
+python -m src.wordle_lab \
+  --strategy second-map-bucket \
+  --first slate \
+  --second-guess-pool answers \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --prior-policy downweight \
+  --prior-weight-values 0.005,0.05,0.15,0.35 \
+  --as-of-date 2026-05-28 \
+  --show-weighted-score
+```
+
+`--prior-weight-values W90,W365,W730,WOLD` means `0-90 days`, `91-365 days`, `366-730 days`, and `730+ days`; never-used answers always keep weight `1.00`. Values must be monotonic: `0 <= W90 <= W365 <= W730 <= WOLD <= 1.00`. If both `--prior-weight-preset` and `--prior-weight-values` are supplied, the custom values win and reports label the schedule as `custom`.
+
 The date basis comes from `--as-of-date YYYY-MM-DD`. If no date is provided, Wordle Lab uses the latest date in the dated prior file, or today when the file is empty.
 
 To compare the Human Mode weighted benchmark under every preset:
@@ -501,6 +517,47 @@ python -m src.wordle_lab \
 ```
 
 The comparison reports total weight, weighted average, weighted `<=3`, weighted `<=4`, weighted `5s`, weighted `6s`, weighted failures, and weighted risk for each preset. Weighted averages print with four decimal places by default; use `--precision N` to choose a different number of decimal places for report averages.
+
+To grid-search custom Human Mode recency schedules:
+
+```bash
+python -m src.wordle_lab \
+  --search-prior-weight-schedules \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --strategy second-map-bucket \
+  --first slate \
+  --second-guess-pool answers \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --prior-policy downweight \
+  --decision-weight-preset aggressive \
+  --as-of-date 2026-05-28 \
+  --weight-90 0.01,0.02,0.05,0.08,0.10 \
+  --weight-365 0.08,0.10,0.12,0.15,0.20 \
+  --weight-730 0.20,0.25,0.30,0.35 \
+  --weight-old 0.45,0.50,0.55,0.60 \
+  --top 25 \
+  --csv results/prior_weight_schedule_search.csv
+```
+
+The search only evaluates monotonic schedules where `weight_90 <= weight_365 <= weight_730 <= weight_old <= 1.00`. It prints the top rows and saves all evaluated schedules when `--csv` is supplied.
+
+Schedule search is fast because it runs the selected strategy once, caches each answer's result and prior-age bucket, then scores weight schedules against those fixed decisions. The CSV is created immediately, each scored schedule is flushed as it is written, and interrupted runs resume from existing rows unless `--force` is supplied. Use `--decision-weight-preset PRESET` to choose the prior-weight preset used for the one actual strategy run; by default it uses the active prior-weight schedule, including `--prior-weight-values` when supplied. Promising schedules should be confirmed with a full Human Mode scoreboard because schedule search does not retune decisions for every schedule:
+
+```bash
+python -m src.wordle_lab \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --strategy second-map-bucket \
+  --first slate \
+  --second-guess-pool answers \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --prior-policy downweight \
+  --prior-weight-values 0.005,0.05,0.15,0.35 \
+  --as-of-date 2026-05-28 \
+  --show-weighted-score \
+  --weighted-worst-patterns 25
+```
 
 ### Weighted Human-Mode Scoring
 

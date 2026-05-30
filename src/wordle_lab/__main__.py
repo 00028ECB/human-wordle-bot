@@ -265,6 +265,21 @@ PRIOR_WEIGHT_PRESET_COMPARISON_COLUMNS = (
     "weighted_risk",
 )
 
+PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS = (
+    "weight_90",
+    "weight_365",
+    "weight_730",
+    "weight_old",
+    "total_weight",
+    "weighted_average",
+    "weighted_<=3",
+    "weighted_<=4",
+    "weighted_5s",
+    "weighted_6s",
+    "weighted_failed",
+    "weighted_risk",
+)
+
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -368,6 +383,11 @@ def build_parser():
         "--compare-prior-weight-presets",
         action="store_true",
         help="compare Human Mode weighted scores across prior-weight presets",
+    )
+    parser.add_argument(
+        "--search-prior-weight-schedules",
+        action="store_true",
+        help="grid search Human Mode prior-weight schedules",
     )
     parser.add_argument(
         "--csv",
@@ -653,6 +673,32 @@ def build_parser():
         help="dated prior-answer weight schedule for Human Mode (default: current)",
     )
     parser.add_argument(
+        "--prior-weight-values",
+        metavar="W90,W365,W730,WOLD",
+        help="custom prior-answer weights for 0-90, 91-365, 366-730, and 730+ day buckets",
+    )
+    parser.add_argument(
+        "--decision-weight-preset",
+        choices=tuple(PRIOR_WEIGHT_PRESETS),
+        help="prior-weight preset used for fixed strategy decisions during schedule search",
+    )
+    parser.add_argument(
+        "--weight-90",
+        help="comma-separated 0-90 day weights for --search-prior-weight-schedules",
+    )
+    parser.add_argument(
+        "--weight-365",
+        help="comma-separated 91-365 day weights for --search-prior-weight-schedules",
+    )
+    parser.add_argument(
+        "--weight-730",
+        help="comma-separated 366-730 day weights for --search-prior-weight-schedules",
+    )
+    parser.add_argument(
+        "--weight-old",
+        help="comma-separated 730+ day weights for --search-prior-weight-schedules",
+    )
+    parser.add_argument(
         "--as-of-date",
         metavar="YYYY-MM-DD",
         help="date to use for dated prior-answer weighting",
@@ -715,9 +761,10 @@ def main(argv=None):
         or args.second_guess_map or args.build_second_map or args.strategy
         or args.compare_strategies or args.tune_pattern or args.tune_branch
         or args.tune_path or args.recommend or args.compare_prior_weight_presets
+        or args.search_prior_weight_schedules
     ):
         raise SystemExit(
-            "--csv can only be used with --compare, --compare-openers-with-strategy, --top-openers, --second-guess-map, --build-second-map, --strategy, --compare-strategies, --tune-pattern, --tune-branch, --tune-path, or --compare-prior-weight-presets"
+            "--csv can only be used with --compare, --compare-openers-with-strategy, --top-openers, --second-guess-map, --build-second-map, --strategy, --compare-strategies, --tune-pattern, --tune-branch, --tune-path, --compare-prior-weight-presets, or --search-prior-weight-schedules"
         )
     if args.compare_openers_with_strategy and not args.strategy:
         raise SystemExit("--compare-openers-with-strategy requires --strategy")
@@ -781,6 +828,22 @@ def main(argv=None):
         raise SystemExit("--expected-depth must be at least 1")
     if args.top < 1:
         raise SystemExit("--top must be at least 1")
+    if args.search_prior_weight_schedules:
+        missing_weight_args = [
+            name
+            for name, value in (
+                ("--weight-90", args.weight_90),
+                ("--weight-365", args.weight_365),
+                ("--weight-730", args.weight_730),
+                ("--weight-old", args.weight_old),
+            )
+            if value is None
+        ]
+        if missing_weight_args:
+            raise SystemExit(
+                "--search-prior-weight-schedules requires "
+                + ", ".join(missing_weight_args)
+            )
     if args.max_patterns is not None and args.max_patterns < 1:
         raise SystemExit("--max-patterns must be at least 1")
     if args.only_worst_patterns is not None and args.only_worst_patterns < 1:
@@ -791,6 +854,8 @@ def main(argv=None):
         raise SystemExit("--max-second-guesses must be at least 1")
     if args.precision is not None and args.precision < 0:
         raise SystemExit("--precision must be at least 0")
+    if args.prior_weight_values and args.prior_policy != "downweight":
+        raise SystemExit("--prior-weight-values requires --prior-policy downweight")
 
     if args.clean_prior_source:
         try:
@@ -825,12 +890,18 @@ def main(argv=None):
 
     try:
         as_of_date = resolve_as_of_date(args.as_of_date, dated_prior_answers)
+        active_prior_weight_schedule, active_prior_weight_schedule_label = (
+            resolve_prior_weight_schedule(
+                args.prior_weight_preset,
+                args.prior_weight_values,
+            )
+        )
     except ValueError as error:
         parser.error(str(error))
-    prior_answer_weights = build_prior_answer_weights(
+    prior_answer_weights = build_prior_answer_weights_for_schedule(
         dated_prior_answers,
         as_of_date,
-        preset=args.prior_weight_preset,
+        active_prior_weight_schedule,
     )
     try:
         temporary_human_overrides = parse_human_overrides(args.human_override)
@@ -860,10 +931,102 @@ def main(argv=None):
             use_overrides=False if args.no_overrides else None,
             precision=4 if args.precision is None else args.precision,
             temporary_human_overrides=temporary_human_overrides,
+            custom_schedule=(
+                active_prior_weight_schedule
+                if active_prior_weight_schedule_label == "custom"
+                else None
+            ),
         )
         print_prior_weight_preset_comparison(rows)
         if args.csv:
             write_prior_weight_preset_comparison_csv(args.csv, rows)
+        return
+    if args.search_prior_weight_schedules:
+        if args.prior_policy != "downweight":
+            parser.error("--search-prior-weight-schedules requires --prior-policy downweight")
+        if not dated_prior_answers:
+            parser.error("--search-prior-weight-schedules requires dated prior answers")
+        csv_context = None
+        try:
+            if args.decision_weight_preset:
+                decision_weight_schedule = PRIOR_WEIGHT_PRESETS[args.decision_weight_preset]
+                decision_weight_schedule_label = args.decision_weight_preset
+            else:
+                decision_weight_schedule = active_prior_weight_schedule
+                decision_weight_schedule_label = active_prior_weight_schedule_label
+            completed_rows = ()
+            completed_schedule_keys = set()
+            if args.csv:
+                if not args.force:
+                    completed_rows = read_prior_weight_schedule_search_rows(args.csv)
+                    completed_schedule_keys = {
+                        prior_weight_schedule_key_from_row(row)
+                        for row in completed_rows
+                    }
+                csv_context = open_incremental_prior_weight_schedule_search_csv(
+                    args.csv,
+                    force=args.force,
+                )
+            print("Running strategy once to cache per-answer results...")
+            print(
+                "Schedule search scores weight schedules against fixed "
+                f"strategy decisions from schedule: {decision_weight_schedule_label}."
+            )
+            decision_prior_answer_weights = build_prior_answer_weights_for_schedule(
+                dated_prior_answers,
+                as_of_date,
+                decision_weight_schedule,
+            )
+            _summary_row, games = build_strategy_result(
+                args.strategy or "second-map-bucket",
+                args.first.lower(),
+                allowed_guesses,
+                possible_answers,
+                second_guess_pool_name=args.second_guess_pool,
+                trap_threshold=args.trap_threshold,
+                endgame_threshold=args.endgame_threshold,
+                max_expected_guesses=args.max_expected_guesses,
+                max_expected_states=args.max_expected_states,
+                expected_depth=args.expected_depth,
+                use_overrides=False if args.no_overrides else None,
+                answer_weighting=args.answer_weighting,
+                small_candidate_order=args.small_candidate_order,
+                final_cluster_overrides=args.final_cluster_overrides,
+                prior_policy="downweight",
+                prior_answer_weights=decision_prior_answer_weights,
+                temporary_human_overrides=temporary_human_overrides,
+            )
+            cached_results = build_prior_weight_schedule_result_cache(
+                games,
+                dated_prior_answers,
+                as_of_date,
+            )
+            print(f"Cached {len(cached_results)} answer results.")
+            schedules = build_valid_prior_weight_schedules(
+                weight_90_values=parse_float_values(args.weight_90, "--weight-90"),
+                weight_365_values=parse_float_values(args.weight_365, "--weight-365"),
+                weight_730_values=parse_float_values(args.weight_730, "--weight-730"),
+                weight_old_values=parse_float_values(args.weight_old, "--weight-old"),
+            )
+            schedules_to_score = tuple(
+                schedule for schedule in schedules
+                if prior_weight_schedule_key(schedule) not in completed_schedule_keys
+            )
+            print(f"Scoring {len(schedules_to_score)} schedules...")
+            new_rows = score_prior_weight_schedules_from_cache(
+                cached_results,
+                schedules_to_score,
+                precision=4 if args.precision is None else args.precision,
+                csv_context=csv_context,
+                show_progress=True,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+        finally:
+            if csv_context is not None:
+                csv_context[0].close()
+        rows = sort_prior_weight_schedule_rows((*completed_rows, *new_rows))
+        print_prior_weight_schedule_search(rows[: args.top])
         return
     if args.tune_pattern_objective == "weighted-risk":
         if args.prior_policy != "downweight":
@@ -876,6 +1039,8 @@ def main(argv=None):
             possible_answers,
             prior_answer_weights,
             preset=args.prior_weight_preset,
+            schedule=active_prior_weight_schedule,
+            schedule_label=active_prior_weight_schedule_label,
         )
         return
 
@@ -896,6 +1061,8 @@ def main(argv=None):
             )
         except ValueError as error:
             parser.error(str(error))
+        if args.prior_policy == "downweight":
+            print(f"Prior weight schedule: {active_prior_weight_schedule_label}")
         print_recommendation(row)
         return
 
@@ -1134,6 +1301,7 @@ def main(argv=None):
                 build_weighted_score_row(games, prior_answer_weights),
                 enabled=args.prior_policy == "downweight",
                 precision=4 if args.precision is None else args.precision,
+                schedule_label=active_prior_weight_schedule_label,
             )
         if args.show_weighting_changes:
             print_weighting_changes(weighting_changes, enabled=args.answer_weighting == "simple")
@@ -1382,6 +1550,44 @@ def prior_answer_weight_for_age(days_since_use, preset="current"):
     return schedule["730+"]
 
 
+def prior_answer_weight_for_age_with_schedule(days_since_use, schedule):
+    if days_since_use <= 90:
+        return schedule["0-90"]
+    if days_since_use <= 365:
+        return schedule["91-365"]
+    if days_since_use <= 730:
+        return schedule["366-730"]
+    return schedule["730+"]
+
+
+def parse_prior_weight_values(text):
+    values = parse_float_values(text, "--prior-weight-values")
+    if len(values) != 4:
+        raise ValueError(
+            "--prior-weight-values requires four comma-separated weights: "
+            "W90,W365,W730,WOLD."
+        )
+    weight_90, weight_365, weight_730, weight_old = values
+    if not (weight_90 <= weight_365 <= weight_730 <= weight_old <= 1.0):
+        raise ValueError(
+            "--prior-weight-values must satisfy "
+            "0 <= W90 <= W365 <= W730 <= WOLD <= 1.00."
+        )
+    return {
+        "0-90": weight_90,
+        "91-365": weight_365,
+        "366-730": weight_730,
+        "730+": weight_old,
+        "never": 1.0,
+    }
+
+
+def resolve_prior_weight_schedule(preset="current", values_text=None):
+    if values_text:
+        return parse_prior_weight_values(values_text), "custom"
+    return PRIOR_WEIGHT_PRESETS[preset], preset
+
+
 def build_prior_answer_weights(
     dated_prior_answers,
     as_of_date,
@@ -1401,12 +1607,37 @@ def build_prior_answer_weights(
     return weights
 
 
+def build_prior_answer_weights_for_schedule(
+    dated_prior_answers,
+    as_of_date,
+    schedule,
+    fallback_prior_answers=(),
+):
+    latest_dates_by_word = {}
+    for answer_date, word in dated_prior_answers:
+        if word not in latest_dates_by_word or answer_date > latest_dates_by_word[word]:
+            latest_dates_by_word[word] = answer_date
+
+    weights = {word: schedule["730+"] for word in fallback_prior_answers}
+    for word, answer_date in latest_dates_by_word.items():
+        days_since_use = max(0, (as_of_date - answer_date).days)
+        weights[word] = prior_answer_weight_for_age_with_schedule(days_since_use, schedule)
+    return weights
+
+
 def prior_weight_for_word(word, prior_answer_weights):
     return prior_answer_weights.get(word, 1.0)
 
 
-def prior_weight_bucket_label(weight, preset="current"):
-    schedule = PRIOR_WEIGHT_PRESETS[preset]
+def format_prior_weight_value(weight):
+    text = f"{weight:.3f}"
+    if text.endswith("0"):
+        return f"{weight:.2f}"
+    return text
+
+
+def prior_weight_bucket_label(weight, preset="current", schedule=None):
+    schedule = schedule or PRIOR_WEIGHT_PRESETS[preset]
     if weight == 1.0:
         return "never used"
     if weight == schedule["0-90"]:
@@ -1420,15 +1651,22 @@ def prior_weight_bucket_label(weight, preset="current"):
     return "other"
 
 
-def build_prior_weight_stats(possible_answers, prior_answer_weights, preset="current"):
-    schedule = PRIOR_WEIGHT_PRESETS[preset]
+def build_prior_weight_stats(
+    possible_answers,
+    prior_answer_weights,
+    preset="current",
+    schedule=None,
+):
+    schedule = schedule or PRIOR_WEIGHT_PRESETS[preset]
     buckets = Counter()
     for answer in possible_answers:
         weight = prior_weight_for_word(answer, prior_answer_weights)
-        buckets[(weight, prior_weight_bucket_label(weight, preset=preset))] += 1
+        buckets[
+            (weight, prior_weight_bucket_label(weight, preset=preset, schedule=schedule))
+        ] += 1
     return tuple(
         {
-            "weight": f"{weight:.2f}",
+            "weight": format_prior_weight_value(weight),
             "bucket": label,
             "count": buckets[(weight, label)],
         }
@@ -1442,12 +1680,40 @@ def build_prior_weight_stats(possible_answers, prior_answer_weights, preset="cur
     )
 
 
-def print_prior_weight_stats_report(possible_answers, prior_answer_weights, preset="current"):
+def print_prior_weight_stats_report(
+    possible_answers,
+    prior_answer_weights,
+    preset="current",
+    schedule=None,
+    schedule_label=None,
+):
+    schedule_label = schedule_label or preset
     print("Prior weight stats:")
-    print(f"Preset: {preset}")
+    print(f"Schedule: {schedule_label}")
     print("weight  bucket                    count")
-    for row in build_prior_weight_stats(possible_answers, prior_answer_weights, preset=preset):
+    for row in build_prior_weight_stats(
+        possible_answers,
+        prior_answer_weights,
+        preset=preset,
+        schedule=schedule,
+    ):
         print(f"{row['weight']:<7} {row['bucket']:<25} {row['count']}")
+
+
+def parse_float_values(text, option_name):
+    values = []
+    for raw_value in text.split(","):
+        raw_value = raw_value.strip()
+        if not raw_value:
+            raise ValueError(f"{option_name} contains an empty value.")
+        try:
+            value = float(raw_value)
+        except ValueError as error:
+            raise ValueError(f"Invalid float for {option_name}: {raw_value!r}") from error
+        if value < 0 or value > 1:
+            raise ValueError(f"{option_name} values must be between 0 and 1.")
+        values.append(value)
+    return tuple(values)
 
 
 def print_prior_dated_stats_report(dated_prior_answers):
@@ -1826,11 +2092,13 @@ def print_expected_diagnostics(row, elapsed_seconds):
     print(f"Elapsed seconds: {elapsed_seconds:.2f}")
 
 
-def print_weighted_score_report(row, enabled=True, precision=4):
+def print_weighted_score_report(row, enabled=True, precision=4, schedule_label=None):
     if not enabled:
         print("Weighted human-mode score: disabled")
         return
     print("Weighted human-mode score:")
+    if schedule_label:
+        print(f"Prior weight schedule: {schedule_label}")
     print(f"Total weight: {row['total_weight']:.2f}")
     print(f"Weighted average guesses: {row['weighted_average']:.{precision}f}")
     print(f"Weighted <=3: {row['weighted_solved_3_or_less']:.2f}")
@@ -4661,13 +4929,20 @@ def build_prior_weight_preset_comparison_rows(
     use_overrides=None,
     precision=4,
     temporary_human_overrides=None,
+    custom_schedule=None,
 ):
     rows = []
-    for preset in PRIOR_WEIGHT_PRESETS:
-        prior_answer_weights = build_prior_answer_weights(
+    schedules = [
+        (preset, PRIOR_WEIGHT_PRESETS[preset])
+        for preset in PRIOR_WEIGHT_PRESETS
+    ]
+    if custom_schedule is not None:
+        schedules.append(("custom", custom_schedule))
+    for preset, schedule in schedules:
+        prior_answer_weights = build_prior_answer_weights_for_schedule(
             dated_prior_answers,
             as_of_date,
-            preset=preset,
+            schedule,
         )
         _summary_row, games = build_strategy_result(
             strategy,
@@ -4706,6 +4981,327 @@ def build_prior_weight_preset_comparison_rows(
             "weighted_risk": f"{weighted_risk:.2f}",
         })
     return tuple(rows)
+
+
+def build_prior_weight_schedule_search_rows(
+    allowed_guesses,
+    possible_answers,
+    dated_prior_answers,
+    as_of_date,
+    strategy,
+    first_guess,
+    second_guess_pool_name,
+    weight_90_values,
+    weight_365_values,
+    weight_730_values,
+    weight_old_values,
+    trap_threshold=2,
+    answer_weighting="off",
+    small_candidate_order="normal",
+    endgame_threshold=10,
+    max_expected_guesses=10,
+    max_expected_states=50000,
+    expected_depth=2,
+    final_cluster_overrides="off",
+    use_overrides=None,
+    precision=4,
+    temporary_human_overrides=None,
+    decision_weight_preset="current",
+):
+    decision_prior_answer_weights = build_prior_answer_weights(
+        dated_prior_answers,
+        as_of_date,
+        preset=decision_weight_preset,
+    )
+    _summary_row, games = build_strategy_result(
+        strategy,
+        first_guess,
+        allowed_guesses,
+        possible_answers,
+        second_guess_pool_name=second_guess_pool_name,
+        trap_threshold=trap_threshold,
+        endgame_threshold=endgame_threshold,
+        max_expected_guesses=max_expected_guesses,
+        max_expected_states=max_expected_states,
+        expected_depth=expected_depth,
+        use_overrides=use_overrides,
+        answer_weighting=answer_weighting,
+        small_candidate_order=small_candidate_order,
+        final_cluster_overrides=final_cluster_overrides,
+        prior_policy="downweight",
+        prior_answer_weights=decision_prior_answer_weights,
+        temporary_human_overrides=temporary_human_overrides,
+    )
+    cached_results = build_prior_weight_schedule_result_cache(
+        games,
+        dated_prior_answers,
+        as_of_date,
+    )
+    schedules = build_valid_prior_weight_schedules(
+        weight_90_values,
+        weight_365_values,
+        weight_730_values,
+        weight_old_values,
+    )
+    return sort_prior_weight_schedule_rows(
+        score_prior_weight_schedules_from_cache(
+            cached_results,
+            schedules,
+            precision=precision,
+        )
+    )
+
+
+def build_valid_prior_weight_schedules(
+    weight_90_values,
+    weight_365_values,
+    weight_730_values,
+    weight_old_values,
+):
+    schedules = []
+    for weight_90 in weight_90_values:
+        for weight_365 in weight_365_values:
+            for weight_730 in weight_730_values:
+                for weight_old in weight_old_values:
+                    if not (weight_90 <= weight_365 <= weight_730 <= weight_old <= 1.0):
+                        continue
+                    schedules.append({
+                        "0-90": weight_90,
+                        "91-365": weight_365,
+                        "366-730": weight_730,
+                        "730+": weight_old,
+                        "never": 1.0,
+                    })
+    return tuple(schedules)
+
+
+def build_prior_weight_schedule_result_cache(games, dated_prior_answers, as_of_date):
+    latest_dates_by_word = latest_prior_dates_by_word(dated_prior_answers)
+    return tuple(
+        {
+            "answer": game.answer,
+            "guesses": game.guess_count,
+            "solved": game.solved,
+            "age_bucket": prior_age_bucket_for_word(
+                game.answer,
+                latest_dates_by_word,
+                as_of_date,
+            ),
+        }
+        for game in games
+    )
+
+
+def latest_prior_dates_by_word(dated_prior_answers):
+    latest_dates = {}
+    for answer_date, word in dated_prior_answers:
+        if word not in latest_dates or answer_date > latest_dates[word]:
+            latest_dates[word] = answer_date
+    return latest_dates
+
+
+def prior_age_bucket_for_word(word, latest_dates_by_word, as_of_date):
+    answer_date = latest_dates_by_word.get(word)
+    if answer_date is None:
+        return "never"
+    days_since_use = max(0, (as_of_date - answer_date).days)
+    if days_since_use <= 90:
+        return "0_90"
+    if days_since_use <= 365:
+        return "91_365"
+    if days_since_use <= 730:
+        return "366_730"
+    return "old_730_plus"
+
+
+def schedule_weight_for_age_bucket(schedule, age_bucket):
+    return {
+        "never": schedule["never"],
+        "0_90": schedule["0-90"],
+        "91_365": schedule["91-365"],
+        "366_730": schedule["366-730"],
+        "old_730_plus": schedule["730+"],
+    }[age_bucket]
+
+
+def score_prior_weight_schedules_from_cache(
+    cached_results,
+    schedules,
+    precision=4,
+    csv_context=None,
+    show_progress=False,
+):
+    rows = []
+    csv_file = None
+    writer = None
+    if csv_context is not None:
+        csv_file, writer = csv_context
+    total_schedules = len(schedules)
+    for index, schedule in enumerate(schedules, start=1):
+        row = format_prior_weight_schedule_search_row(
+            schedule,
+            cached_results,
+            precision=precision,
+        )
+        rows.append(row)
+        if writer is not None:
+            writer.writerow(row)
+            csv_file.flush()
+        if show_progress and (index % 100 == 0 or index == total_schedules):
+            print(f"Scored {index}/{total_schedules} schedules...")
+    return tuple(rows)
+
+
+def format_prior_weight_schedule_value(weight):
+    return f"{weight:.3f}"
+
+
+def normalize_prior_weight_schedule_value(text):
+    return format_prior_weight_schedule_value(float(text))
+
+
+def format_prior_weight_schedule_search_row(
+    schedule,
+    cached_results,
+    precision=4,
+):
+    weighted = build_weighted_score_row_from_cached_results(
+        cached_results,
+        schedule,
+    )
+    weighted_risk = (
+        weighted["weighted_fives"] * 2
+        + weighted["weighted_sixes"] * 5
+        + weighted["weighted_failed"] * 20
+    )
+    return {
+        "weight_90": format_prior_weight_schedule_value(schedule["0-90"]),
+        "weight_365": format_prior_weight_schedule_value(schedule["91-365"]),
+        "weight_730": format_prior_weight_schedule_value(schedule["366-730"]),
+        "weight_old": format_prior_weight_schedule_value(schedule["730+"]),
+        "total_weight": f"{weighted['total_weight']:.2f}",
+        "weighted_average": f"{weighted['weighted_average']:.{precision}f}",
+        "weighted_<=3": f"{weighted['weighted_solved_3_or_less']:.2f}",
+        "weighted_<=4": f"{weighted['weighted_solved_4_or_less']:.2f}",
+        "weighted_5s": f"{weighted['weighted_fives']:.2f}",
+        "weighted_6s": f"{weighted['weighted_sixes']:.2f}",
+        "weighted_failed": f"{weighted['weighted_failed']:.2f}",
+        "weighted_risk": f"{weighted_risk:.2f}",
+    }
+
+
+def build_weighted_score_row_from_cached_results(cached_results, schedule):
+    total_weight = 0.0
+    weighted_guess_sum = 0.0
+    weighted_solved_3_or_less = 0.0
+    weighted_solved_4_or_less = 0.0
+    weighted_fives = 0.0
+    weighted_sixes = 0.0
+    weighted_failed = 0.0
+
+    for result in cached_results:
+        weight = schedule_weight_for_age_bucket(schedule, result["age_bucket"])
+        total_weight += weight
+        weighted_guess_sum += weight * result["guesses"]
+        if result["solved"] and result["guesses"] <= 3:
+            weighted_solved_3_or_less += weight
+        if result["solved"] and result["guesses"] <= 4:
+            weighted_solved_4_or_less += weight
+        if result["solved"] and result["guesses"] == 5:
+            weighted_fives += weight
+        if result["solved"] and result["guesses"] == 6:
+            weighted_sixes += weight
+        if not result["solved"]:
+            weighted_failed += weight
+
+    weighted_average = weighted_guess_sum / total_weight if total_weight else 0
+    return {
+        "total_weight": total_weight,
+        "weighted_average": weighted_average,
+        "weighted_solved_3_or_less": weighted_solved_3_or_less,
+        "weighted_solved_4_or_less": weighted_solved_4_or_less,
+        "weighted_fives": weighted_fives,
+        "weighted_sixes": weighted_sixes,
+        "weighted_failed": weighted_failed,
+    }
+
+
+def sort_prior_weight_schedule_rows(rows):
+    return tuple(sorted(
+        rows,
+        key=lambda row: (
+            float(row["weighted_6s"]),
+            float(row["weighted_failed"]),
+            float(row["weighted_average"]),
+            float(row["weighted_risk"]),
+        ),
+    ))
+
+
+def prior_weight_schedule_key(schedule):
+    return (
+        format_prior_weight_schedule_value(schedule["0-90"]),
+        format_prior_weight_schedule_value(schedule["91-365"]),
+        format_prior_weight_schedule_value(schedule["366-730"]),
+        format_prior_weight_schedule_value(schedule["730+"]),
+    )
+
+
+def prior_weight_schedule_key_from_row(row):
+    return (
+        normalize_prior_weight_schedule_value(row["weight_90"]),
+        normalize_prior_weight_schedule_value(row["weight_365"]),
+        normalize_prior_weight_schedule_value(row["weight_730"]),
+        normalize_prior_weight_schedule_value(row["weight_old"]),
+    )
+
+
+def format_prior_weight_schedule_search_row_from_games(
+    schedule,
+    games,
+    prior_answer_weights,
+    precision=4,
+):
+    weighted = build_weighted_score_row(games, prior_answer_weights)
+    weighted_risk = (
+        weighted["weighted_fives"] * 2
+        + weighted["weighted_sixes"] * 5
+        + weighted["weighted_failed"] * 20
+    )
+    return {
+        "weight_90": format_prior_weight_schedule_value(schedule["0-90"]),
+        "weight_365": format_prior_weight_schedule_value(schedule["91-365"]),
+        "weight_730": format_prior_weight_schedule_value(schedule["366-730"]),
+        "weight_old": format_prior_weight_schedule_value(schedule["730+"]),
+        "total_weight": f"{weighted['total_weight']:.2f}",
+        "weighted_average": f"{weighted['weighted_average']:.{precision}f}",
+        "weighted_<=3": f"{weighted['weighted_solved_3_or_less']:.2f}",
+        "weighted_<=4": f"{weighted['weighted_solved_4_or_less']:.2f}",
+        "weighted_5s": f"{weighted['weighted_fives']:.2f}",
+        "weighted_6s": f"{weighted['weighted_sixes']:.2f}",
+        "weighted_failed": f"{weighted['weighted_failed']:.2f}",
+        "weighted_risk": f"{weighted_risk:.2f}",
+    }
+
+
+def print_prior_weight_schedule_search(rows):
+    print("Prior weight schedule search:")
+    print("weight_90  weight_365  weight_730  weight_old  total_weight  weighted_average  weighted_<=3  weighted_<=4  weighted_5s  weighted_6s  weighted_failed  weighted_risk")
+    for row in rows:
+        print(
+            f"{row['weight_90']:<10} "
+            f"{row['weight_365']:<11} "
+            f"{row['weight_730']:<11} "
+            f"{row['weight_old']:<11} "
+            f"{row['total_weight']:<13} "
+            f"{row['weighted_average']:<17} "
+            f"{row['weighted_<=3']:<13} "
+            f"{row['weighted_<=4']:<13} "
+            f"{row['weighted_5s']:<12} "
+            f"{row['weighted_6s']:<12} "
+            f"{row['weighted_failed']:<16} "
+            f"{row['weighted_risk']}"
+        )
 
 
 def print_prior_weight_preset_comparison(rows):
@@ -5609,6 +6205,57 @@ def write_prior_weight_preset_comparison_csv(path, rows):
         )
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_prior_weight_schedule_search_csv(path, rows):
+    csv_path = Path(path)
+    if csv_path.parent != Path("."):
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames=PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS,
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def read_prior_weight_schedule_search_rows(path):
+    csv_path = Path(path)
+    if not csv_path.exists():
+        return ()
+    with csv_path.open(newline="", encoding="utf-8") as csv_file:
+        reader = csv.DictReader(csv_file)
+        if reader.fieldnames is None:
+            return ()
+        required_columns = set(PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS)
+        if not required_columns.issubset(reader.fieldnames):
+            raise ValueError(
+                "Prior weight schedule search CSV has incompatible columns."
+            )
+        return tuple(
+            {column: row[column] for column in PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS}
+            for row in reader
+            if all(row.get(column, "") != "" for column in PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS)
+        )
+
+
+def open_incremental_prior_weight_schedule_search_csv(path, force=False):
+    csv_path = Path(path)
+    if csv_path.parent != Path("."):
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = force or not csv_path.exists() or csv_path.stat().st_size == 0
+    mode = "w" if force else "a"
+    csv_file = csv_path.open(mode, newline="", encoding="utf-8")
+    writer = csv.DictWriter(
+        csv_file,
+        fieldnames=PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS,
+    )
+    if write_header:
+        writer.writeheader()
+        csv_file.flush()
+    return csv_file, writer
 
 
 if __name__ == "__main__":
