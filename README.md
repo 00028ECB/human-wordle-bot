@@ -1,5 +1,7 @@
 # Wordle Lab
 
+This is a Stewart Labs hobby/research project, built for fun and curiosity rather than as an official Wordle product.
+
 A local Python lab for experimenting with Wordle strategy.
 
 Wordle Lab supports both Pure Mode benchmarking and Human Mode daily recommendations:
