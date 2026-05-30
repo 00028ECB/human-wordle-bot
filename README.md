@@ -50,7 +50,7 @@ Notes: this is the clean mathematical benchmark mode. It does not use prior-answ
 
 ### Human Mode Champion
 
-Purpose: real-world daily-play mode. Uses dated prior-answer history, the `aggressive` prior-weight preset, Human Mode overrides, and streak-safe bucket logic. This is the current weighted daily-play champion.
+Purpose: real-world daily-play mode. Uses dated prior-answer history, a custom aggressive prior-weight schedule, Human Mode overrides, and streak-safe bucket logic. This is the current weighted daily-play champion.
 
 Current command:
 
@@ -63,7 +63,7 @@ python -m src.wordle_lab \
   --second-guess-pool answers \
   --prior-answers-dated data/prior_answers_dated.csv \
   --prior-policy downweight \
-  --prior-weight-preset aggressive \
+  --prior-weight-values 0.005,0.05,0.15,0.35 \
   --as-of-date 2026-05-28 \
   --show-weighted-score \
   --weighted-worst-patterns 25
@@ -75,17 +75,31 @@ Current weighted result, as of `2026-05-28`:
 Strategy: second-map-bucket
 First: slate
 Pool: answers
-Total weight: 1206.48
-Weighted average guesses: 3.4274
-Weighted <=3: 660.67
-Weighted <=4: 1191.80
-Weighted 5s: 14.68
+Prior policy: downweight
+Prior weight values: 0.005,0.05,0.15,0.35
+As of date: 2026-05-28
+Total weight: 998.37
+Weighted average guesses: 3.4164
+Weighted <=3: 555.96
+Weighted <=4: 987.60
+Weighted 5s: 10.77
 Weighted 6s: 0.00
 Weighted failed: 0.00
-Weighted risk: 29.36
 ```
 
-The previous `current` preset result was weighted average `3.4348`, weighted `5s` `17.80`, and weighted risk `35.60`. `aggressive` is now the best tested Human Mode preset. Human Mode's symbolic target is to get weighted average below roughly `3.421`, but this is a weighted real-world-play benchmark, not a claim of beating the pure mathematical optimum.
+This beats the symbolic `3.421` target on our Human Mode weighted benchmark. It is a weighted real-world-play benchmark, not a claim of beating the pure mathematical optimum.
+
+The schedule is intentionally aggressive about downweighting prior answers:
+
+```text
+used within last 90 days: 0.005
+used 91-365 days ago:    0.05
+used 366-730 days ago:   0.15
+used more than 730 days:  0.35
+never used:               1.00
+```
+
+The previous `aggressive` preset result was total weight `1206.48`, weighted average `3.4274`, weighted `5s` `14.68`, and weighted risk `29.36`. The earlier `current` preset result was weighted average `3.4348`, weighted `5s` `17.80`, and weighted risk `35.60`. Pure Mode remains separate and unchanged.
 
 Ordinary uniform report shown during Human Mode:
 
@@ -133,6 +147,7 @@ Human Mode:
 ```bash
 python -m src.wordle_lab --human-recommend slate ....Y
 python -m src.wordle_lab --human-recommend slate ....Y --prior-weight-preset aggressive
+python -m src.wordle_lab --human-recommend slate ....Y --prior-weight-values 0.005,0.05,0.15,0.35
 ```
 
 Pure Mode:
