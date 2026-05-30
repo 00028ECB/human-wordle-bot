@@ -8,6 +8,8 @@ from .scoring import is_solved, score_guess
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ALLOWED_GUESSES_PATH = PROJECT_ROOT / "data" / "allowed_guesses.txt"
 DEFAULT_ANSWERS_PATH = PROJECT_ROOT / "data" / "answers.txt"
+DEFAULT_PRIOR_ANSWERS_PATH = PROJECT_ROOT / "data" / "prior_answers.txt"
+DEFAULT_PRIOR_ANSWERS_DATED_PATH = PROJECT_ROOT / "data" / "prior_answers_dated.csv"
 DEFAULT_FIRST_GUESS = "raise"
 
 

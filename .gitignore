@@ -1,8 +1,12 @@
+# macOS
 .DS_Store
+
+# Python
 __pycache__/
 *.pyc
-.venv/
-.env
+
+# Scratch/import files
+downloads/
+
+# Generated experiment outputs
 results/
-downloads/
-downloads/
