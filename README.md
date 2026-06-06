@@ -172,6 +172,78 @@ Human slate ....Y drown .Y... recommends furry.
 
 Pure Mode is for fair mathematical comparison. Human Mode is for real-world daily play. They should not be compared as if they are the same benchmark. Wordle now allows repeats, so Human Mode uses downweighting rather than treating prior answers as impossible. `--prior-policy exclude` is diagnostic, not the preferred real-world mode.
 
+### Hard Mode Experiment
+
+Hard Mode requires every later guess to respect all known greens, yellows, and grays, including Wordle-compatible duplicate-letter limits. This matches Wordle's official Hard Mode style. Add `--hard-mode` to recommendation commands or strategy benchmarks to enable it.
+
+Human Mode Hard recommendation:
+
+```bash
+python -m src.wordle_lab \
+  --human-recommend slate ....Y \
+  --prior-weight-values 0.005,0.05,0.15,0.35 \
+  --hard-mode
+```
+
+Full Human Mode Hard benchmark:
+
+```bash
+python -m src.wordle_lab \
+  --answers data/wordle_answers_full.txt \
+  --allowed data/wordle_allowed_guesses_full.txt \
+  --strategy second-map-bucket \
+  --first slate \
+  --second-guess-pool answers \
+  --prior-answers-dated data/prior_answers_dated.csv \
+  --prior-policy downweight \
+  --prior-weight-values 0.005,0.05,0.15,0.35 \
+  --as-of-date 2026-05-28 \
+  --show-weighted-score \
+  --weighted-worst-patterns 25 \
+  --hard-mode \
+  --show-hard-mode-skips
+```
+
+Experimental benchmark results:
+
+```text
+Uniform report
+Average: 3.57
+<=3: 1098
+<=4: 2119
+5s: 159
+6s: 27
+Failed: 0
+Risk: 453
+
+Weighted Human Mode report
+Weighted average: 3.4127
+Weighted <=3: 564.10
+Weighted <=4: 954.95
+Weighted 5s: 37.71
+Weighted 6s: 4.51
+Weighted failed: 0.00
+
+Hard Mode override skips: 331
+```
+
+Hard Mode produced a slightly lower weighted average than unrestricted Human Mode, but it greatly increased tail risk. It introduced weighted sixes and even max-guess paths beyond six in diagnostic output. It also skipped many tuned Human Mode probe overrides because those guesses are illegal under Hard Mode constraints.
+
+For example, after `slate ....Y`, unrestricted Human Mode wants `drown`. Hard Mode requires the known yellow `e` to be reused somewhere other than its original position, so `drown` is illegal.
+
+Hard Mode is supported as an experimental, high-risk variant. It is not the project champion. The current Human Mode champion remains unrestricted Human Mode with:
+
+```text
+Prior weight values: 0.005,0.05,0.15,0.35
+Weighted average: 3.4164
+Weighted 5s: 10.77
+Weighted 6s: 0.00
+```
+
+Hard Mode is interesting, but it violates the personality of this solver. It lowers the weighted average slightly, but it does so by accepting far too much tail risk. Since the goal of Human Mode is to be smart, prior-aware, and streak-safe, unrestricted Human Mode remains the champion.
+
+Hard Mode is a separate benchmark with a restricted legal guess space. It should not be compared directly with unrestricted Pure Mode or Human Mode as though they were the same benchmark.
+
 ## Project Structure
 
 ```text
