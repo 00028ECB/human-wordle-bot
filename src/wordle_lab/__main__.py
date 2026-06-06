@@ -709,6 +709,16 @@ def build_parser():
         help="show where dated prior weighting changes answer choices",
     )
     parser.add_argument(
+        "--hard-mode",
+        action="store_true",
+        help="require every guess to respect all prior green, yellow, gray, and duplicate feedback",
+    )
+    parser.add_argument(
+        "--show-hard-mode-skips",
+        action="store_true",
+        help="show overrides skipped because they are illegal in Hard Mode",
+    )
+    parser.add_argument(
         "--show-small-candidate-events",
         type=int,
         metavar="N",
@@ -808,6 +818,8 @@ def main(argv=None):
         raise SystemExit("--show-final-cluster-override-changes can only be used with --strategy")
     if args.show_prior_weighting_changes and not args.strategy:
         raise SystemExit("--show-prior-weighting-changes can only be used with --strategy")
+    if args.show_hard_mode_skips and not (args.strategy or args.recommend):
+        raise SystemExit("--show-hard-mode-skips requires --strategy or --recommend")
     if args.show_small_candidate_events is not None and not args.strategy:
         raise SystemExit("--show-small-candidate-events can only be used with --strategy")
     if args.show_small_candidate_events is not None and args.show_small_candidate_events < 1:
@@ -995,6 +1007,7 @@ def main(argv=None):
                 prior_policy="downweight",
                 prior_answer_weights=decision_prior_answer_weights,
                 temporary_human_overrides=temporary_human_overrides,
+                hard_mode=args.hard_mode,
             )
             cached_results = build_prior_weight_schedule_result_cache(
                 games,
@@ -1058,12 +1071,15 @@ def main(argv=None):
                 use_overrides=False if args.no_overrides else None,
                 recommend_top=args.recommend_top,
                 temporary_human_overrides=temporary_human_overrides,
+                hard_mode=args.hard_mode,
             )
         except ValueError as error:
             parser.error(str(error))
         if args.prior_policy == "downweight":
             print(f"Prior weight schedule: {active_prior_weight_schedule_label}")
         print_recommendation(row)
+        if args.show_hard_mode_skips:
+            print_hard_mode_skips(row["hard_mode_skips"])
         return
 
     if args.compare_openers_with_strategy:
@@ -1248,6 +1264,7 @@ def main(argv=None):
         final_cluster_override_changes = []
         prior_weighting_changes = []
         small_candidate_events = []
+        hard_mode_skips = []
         start_time = time.perf_counter()
         try:
             row, games = build_strategy_result(
@@ -1289,11 +1306,15 @@ def main(argv=None):
                     else None
                 ),
                 temporary_human_overrides=temporary_human_overrides,
+                hard_mode=args.hard_mode,
+                hard_mode_skips=hard_mode_skips if args.show_hard_mode_skips else None,
             )
         except ValueError as error:
             parser.error(str(error))
         elapsed_seconds = time.perf_counter() - start_time
         print_strategy_report((row,))
+        if args.hard_mode:
+            print("Hard Mode: on")
         if args.strategy == "second-map-expected":
             print_expected_diagnostics(row, elapsed_seconds)
         if args.show_weighted_score:
@@ -1320,6 +1341,8 @@ def main(argv=None):
                 prior_weighting_changes,
                 enabled=args.prior_policy == "downweight",
             )
+        if args.show_hard_mode_skips:
+            print_hard_mode_skips(hard_mode_skips)
         if args.show_small_candidate_events:
             print_small_candidate_events(
                 small_candidate_events,
@@ -1791,15 +1814,27 @@ def build_recommendation(
     use_overrides=None,
     recommend_top=5,
     temporary_human_overrides=None,
+    hard_mode=False,
 ):
     path_guesses, path_patterns = parse_tune_path(state_steps, allowed_guesses)
+    history = tuple(zip(path_guesses, path_patterns))
+    if hard_mode:
+        validate_hard_mode_history(history)
     candidates = filter_candidates_for_path(possible_answers, path_guesses, path_patterns)
     candidates = apply_prior_policy_to_candidates(candidates, prior_answers, prior_policy)
     if not candidates:
         raise ValueError("No answers match the supplied recommendation state.")
 
     probe_pool = allowed_guesses if second_guess_pool_name == "allowed" else possible_answers
+    legal_probe_pool = (
+        filter_hard_mode_legal_guesses(probe_pool, history)
+        if hard_mode
+        else tuple(probe_pool)
+    )
+    if not legal_probe_pool:
+        raise ValueError("No legal guesses remain under the supplied Hard Mode state.")
     override_mode = None
+    skipped_override = None
     recommendation = find_recommendation_first_pattern_override(
         path_guesses,
         path_patterns,
@@ -1817,11 +1852,15 @@ def build_recommendation(
             if prior_policy == "downweight" and prior_answer_weights
             else "Pure Mode"
         )
+        if hard_mode and recommendation not in set(legal_probe_pool):
+            skipped_override = recommendation
+            recommendation = None
+            override_mode = None
     if recommendation is None:
         recommendation = choose_bucket_probe_with_prior_diagnostics(
             candidates,
             path_guesses,
-            probe_pool,
+            legal_probe_pool,
             prior_policy=prior_policy,
             prior_answer_weights=prior_answer_weights,
         )
@@ -1829,7 +1868,7 @@ def build_recommendation(
         recommendation = choose_answer_candidate(
             candidates,
             path_guesses,
-            allowed_guesses,
+            legal_probe_pool,
             "off",
             prior_policy=prior_policy,
             prior_answer_weights=prior_answer_weights,
@@ -1838,7 +1877,7 @@ def build_recommendation(
     alternatives = build_recommendation_alternatives(
         candidates,
         path_guesses,
-        probe_pool,
+        legal_probe_pool,
         recommendation,
         prior_policy=prior_policy,
         prior_answer_weights=prior_answer_weights,
@@ -1868,6 +1907,17 @@ def build_recommendation(
         "bucket_count": len(bucket_sizes),
         "expected_remaining": f"{expected_remaining:.2f}",
         "alternatives": alternatives,
+        "hard_mode": hard_mode,
+        "hard_mode_skips": (
+            ({
+                "answer": "",
+                "guess_number": len(path_guesses) + 1,
+                "override": skipped_override,
+                "history": format_tune_path_label(path_guesses, path_patterns),
+            },)
+            if skipped_override
+            else ()
+        ),
         "show_weighted_expected": prior_policy == "downweight" and bool(prior_answer_weights),
         "explanation": build_recommendation_explanation(
             recommendation,
@@ -1877,6 +1927,7 @@ def build_recommendation(
             override_mode=override_mode,
             override_first=path_guesses[0],
             override_pattern=path_patterns[0],
+            skipped_override=skipped_override,
         ),
     }
 
@@ -2025,7 +2076,13 @@ def build_recommendation_explanation(
     override_mode=None,
     override_first=None,
     override_pattern=None,
+    skipped_override=None,
 ):
+    if skipped_override:
+        return (
+            f"Skipped override {skipped_override} because it is illegal in Hard Mode. "
+            f"Chose {recommendation} using the legal Hard Mode guess pool."
+        )
     if override_mode:
         return f"Used {override_mode} override for {override_first} {override_pattern}."
     guess_type = "possible answer" if is_possible_answer else "probe"
@@ -2039,6 +2096,7 @@ def build_recommendation_explanation(
 
 def print_recommendation(row):
     print("Recommendation:")
+    print(f"Hard Mode: {'on' if row.get('hard_mode') else 'off'}")
     print(f"State: {row['path']}")
     print(f"Remaining candidates: {row['remaining_count']}")
     print(f"Top candidates: {row['top_candidates']}")
@@ -3750,6 +3808,8 @@ def build_strategy_result(
     prior_weighting_changes=None,
     small_candidate_events=None,
     temporary_human_overrides=None,
+    hard_mode=False,
+    hard_mode_skips=None,
 ):
     if first_guess not in allowed_guesses:
         raise ValueError(f"First guess {first_guess!r} is not in the allowed guess list.")
@@ -3844,7 +3904,9 @@ def build_strategy_result(
             second_guess_by_pattern = {
                 row["pattern"]: row["best_balanced"] for row in second_guess_rows
             }
+            override_patterns = set()
             if effective_use_overrides:
+                default_second_guesses = dict(second_guess_by_pattern)
                 apply_second_guess_overrides(
                     first_guess,
                     second_guess_pool_name,
@@ -3854,6 +3916,13 @@ def build_strategy_result(
                     prior_answer_weights=prior_answer_weights,
                     temporary_human_overrides=temporary_human_overrides,
                 )
+                override_patterns = {
+                    pattern
+                    for pattern, guess in second_guess_by_pattern.items()
+                    if guess != default_second_guesses.get(pattern)
+                }
+        if built_second_map_path:
+            override_patterns = set()
         expected_optimizer = None
         if strategy == "second-map-expected":
             expected_optimizer = ExpectedValueOptimizer(
@@ -3890,6 +3959,9 @@ def build_strategy_result(
                 prior_answer_weights=prior_answer_weights,
                 prior_weighting_changes=prior_weighting_changes,
                 small_candidate_events=small_candidate_events,
+                override_patterns=override_patterns,
+                hard_mode=hard_mode,
+                hard_mode_skips=hard_mode_skips,
             )
             for answer in tested_answers
         )
@@ -3939,6 +4011,9 @@ def play_second_map_game(
     prior_answer_weights=None,
     prior_weighting_changes=None,
     small_candidate_events=None,
+    override_patterns=(),
+    hard_mode=False,
+    hard_mode_skips=None,
 ):
     guesses = []
     candidates = apply_prior_policy_to_candidates(
@@ -3951,12 +4026,39 @@ def play_second_map_game(
 
     first_feedback = score_guess(first_guess, answer)
     guesses.append(first_guess)
+    feedback_history = [(first_guess, first_feedback)]
     if is_solved(first_feedback):
         return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
 
     candidates = filter_candidates_by_feedback(candidates, first_guess, first_feedback)
     candidates = apply_prior_policy_to_candidates(candidates, prior_answers, prior_policy)
     second_guess = second_guess_by_pattern[first_feedback]
+    if hard_mode and not is_hard_mode_legal_guess(second_guess, feedback_history):
+        if first_feedback in set(override_patterns):
+            record_hard_mode_skip(
+                hard_mode_skips,
+                second_guess,
+                len(guesses) + 1,
+                feedback_history,
+                answer,
+            )
+        legal_probe_pool = filter_hard_mode_legal_guesses(probe_pool, feedback_history)
+        second_guess = choose_bucket_probe_with_prior_diagnostics(
+            candidates,
+            guesses,
+            legal_probe_pool,
+            prior_policy=prior_policy,
+            prior_answer_weights=prior_answer_weights,
+        )
+        if second_guess is None:
+            second_guess = choose_answer_candidate(
+                candidates,
+                guesses,
+                legal_probe_pool,
+                answer_weighting,
+                prior_policy=prior_policy,
+                prior_answer_weights=prior_answer_weights,
+            )
     record_small_candidate_event(
         small_candidate_events,
         answer,
@@ -3967,6 +4069,7 @@ def play_second_map_game(
     )
     second_feedback = score_guess(second_guess, answer)
     guesses.append(second_guess)
+    feedback_history.append((second_guess, second_feedback))
     if is_solved(second_feedback):
         return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
 
@@ -3983,17 +4086,40 @@ def play_second_map_game(
             probe_pool,
             guesses,
         )
+        if (
+            hard_mode
+            and path_override is not None
+            and not is_hard_mode_legal_guess(path_override, feedback_history)
+        ):
+            record_hard_mode_skip(
+                hard_mode_skips,
+                path_override,
+                len(guesses) + 1,
+                feedback_history,
+                answer,
+            )
+            path_override = None
     while candidates:
         pre_guess_candidates = candidates
         if path_override is not None:
             next_guess = path_override
             path_override = None
         else:
+            legal_allowed_guesses = (
+                filter_hard_mode_legal_guesses(allowed_guesses, feedback_history)
+                if hard_mode
+                else allowed_guesses
+            )
+            legal_probe_pool = (
+                filter_hard_mode_legal_guesses(probe_pool, feedback_history)
+                if hard_mode
+                else probe_pool
+            )
             next_guess = choose_next_guess_with_optional_probe(
                 candidates,
                 guesses,
-                allowed_guesses,
-                probe_pool,
+                legal_allowed_guesses,
+                legal_probe_pool,
                 use_trap_avoidance,
                 use_bucket_strategy,
                 use_hybrid_strategy,
@@ -4025,6 +4151,7 @@ def play_second_map_game(
         )
         feedback = score_guess(next_guess, answer)
         guesses.append(next_guess)
+        feedback_history.append((next_guess, feedback))
         if is_solved(feedback):
             return GameResult(answer=answer, guesses=tuple(guesses), solved=True)
         candidates = filter_candidates_by_feedback(candidates, next_guess, feedback)
@@ -4104,6 +4231,52 @@ def play_baseline_game(
 def filter_candidates_by_feedback(candidates, guess, feedback):
     return tuple(
         candidate for candidate in candidates if score_guess(guess, candidate) == feedback
+    )
+
+
+def is_hard_mode_legal_guess(guess, history):
+    return all(
+        score_guess(previous_guess, guess) == feedback
+        for previous_guess, feedback in history
+    )
+
+
+def filter_hard_mode_legal_guesses(guesses, history):
+    return tuple(
+        guess for guess in guesses
+        if is_hard_mode_legal_guess(guess, history)
+    )
+
+
+def validate_hard_mode_history(history):
+    prior_history = []
+    for guess, feedback in history:
+        if prior_history and not is_hard_mode_legal_guess(guess, prior_history):
+            raise ValueError(
+                f"State guess {guess!r} is illegal in Hard Mode for the prior feedback."
+            )
+        prior_history.append((guess, feedback))
+
+
+def record_hard_mode_skip(
+    skips,
+    override,
+    guess_number,
+    history,
+    answer="",
+):
+    if skips is None:
+        return
+    skips.append(
+        {
+            "answer": answer,
+            "guess_number": guess_number,
+            "override": override,
+            "history": format_tune_path_label(
+                tuple(guess for guess, _feedback in history),
+                tuple(feedback for _guess, feedback in history),
+            ),
+        }
     )
 
 
@@ -5753,6 +5926,20 @@ def print_final_cluster_override_changes(changes, enabled=True, limit=25):
             f"{change['normal_choice']:<7} "
             f"{change['override_choice']:<8} "
             f"{format_remaining_candidates(change['remaining_candidates'])}"
+        )
+
+
+def print_hard_mode_skips(skips, limit=25):
+    print(f"Hard Mode override skips: {len(skips)}")
+    if not skips:
+        return
+    print("answer  guess#  override  history")
+    for skip in skips[:limit]:
+        print(
+            f"{skip['answer'] or '-':<7} "
+            f"{skip['guess_number']:<7} "
+            f"{skip['override']:<8} "
+            f"{skip['history']}"
         )
 
 

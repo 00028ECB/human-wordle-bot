@@ -79,7 +79,9 @@ from src.wordle_lab.__main__ import (
     filter_candidates_for_path,
     format_tune_path_label,
     format_remaining_candidates,
+    filter_hard_mode_legal_guesses,
     is_trap_family,
+    is_hard_mode_legal_guess,
     load_dated_prior_answers,
     load_built_second_map,
     open_incremental_built_second_map_csv,
@@ -94,6 +96,7 @@ from src.wordle_lab.__main__ import (
     print_clean_prior_source_report,
     print_final_clusters,
     print_final_cluster_override_changes,
+    print_hard_mode_skips,
     print_opener_strategy_report,
     print_prior_stats_report,
     print_prior_dated_stats_report,
@@ -309,6 +312,14 @@ class CliTests(unittest.TestCase):
         args = build_parser().parse_args(["--strategy", "baseline", "--show-weighted-score"])
 
         self.assertTrue(args.show_weighted_score)
+
+    def test_parser_accepts_hard_mode_options(self):
+        args = build_parser().parse_args(
+            ["--strategy", "second-map-bucket", "--hard-mode", "--show-hard-mode-skips"]
+        )
+
+        self.assertTrue(args.hard_mode)
+        self.assertTrue(args.show_hard_mode_skips)
 
     def test_parser_accepts_show_small_candidate_events(self):
         args = build_parser().parse_args(
@@ -1023,6 +1034,37 @@ class CliTests(unittest.TestCase):
         self.assertEqual(counts["1.00"], 1)
         self.assertEqual(counts["0.05"], 1)
         self.assertEqual(counts["0.60"], 1)
+
+    def test_hard_mode_keeps_green_letters_fixed(self):
+        history = (("slate", score_guess("slate", "slack")),)
+
+        self.assertTrue(is_hard_mode_legal_guess("slack", history))
+        self.assertFalse(is_hard_mode_legal_guess("plate", history))
+
+    def test_hard_mode_reuses_yellow_outside_its_position(self):
+        history = (("slate", "....Y"),)
+
+        self.assertTrue(is_hard_mode_legal_guess("diner", history))
+        self.assertFalse(is_hard_mode_legal_guess("drown", history))
+        self.assertFalse(is_hard_mode_legal_guess("genre", history))
+
+    def test_hard_mode_excludes_truly_absent_gray_letters(self):
+        history = (("slate", "....."),)
+
+        self.assertTrue(is_hard_mode_legal_guess("crown", history))
+        self.assertFalse(is_hard_mode_legal_guess("stink", history))
+
+    def test_hard_mode_duplicate_limits_match_scoring(self):
+        feedback = score_guess("array", "cigar")
+        history = (("array", feedback),)
+
+        self.assertEqual(feedback, ".Y.G.")
+        self.assertTrue(is_hard_mode_legal_guess("sugar", history))
+        self.assertFalse(is_hard_mode_legal_guess("array", history))
+        self.assertEqual(
+            filter_hard_mode_legal_guesses(("sugar", "array"), history),
+            ("sugar",),
+        )
 
     def test_build_prior_weight_stats_uses_selected_preset(self):
         rows = build_prior_weight_stats(
@@ -2312,6 +2354,57 @@ class CliTests(unittest.TestCase):
         self.assertIn("Prior weights:", report)
         self.assertIn("cider:0.05", report)
         self.assertIn("weighted_expected_remaining", report)
+
+    def test_main_hard_mode_recommend_skips_drown_override(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            answers_path = temp_path / "answers.txt"
+            allowed_path = temp_path / "allowed.txt"
+            prior_dated_path = temp_path / "prior_dated.csv"
+            answers_path.write_text(
+                "cider\ndiner\npoker\nrocky\ndrown\n",
+                encoding="utf-8",
+            )
+            allowed_path.write_text(
+                "slate\ncider\ndiner\npoker\nrocky\ndrown\n",
+                encoding="utf-8",
+            )
+            prior_dated_path.write_text(
+                "date,word\n2025-08-01,cider\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                main([
+                    "--answers",
+                    str(answers_path),
+                    "--allowed",
+                    str(allowed_path),
+                    "--recommend",
+                    "--strategy",
+                    "second-map-bucket",
+                    "--state",
+                    "slate",
+                    "....Y",
+                    "--second-guess-pool",
+                    "answers",
+                    "--prior-answers-dated",
+                    str(prior_dated_path),
+                    "--prior-policy",
+                    "downweight",
+                    "--hard-mode",
+                    "--show-hard-mode-skips",
+                ])
+
+        report = output.getvalue()
+        self.assertIn("Hard Mode: on", report)
+        self.assertNotIn("Recommended next guess: drown", report)
+        self.assertIn(
+            "Skipped override drown because it is illegal in Hard Mode.",
+            report,
+        )
+        self.assertIn("Hard Mode override skips: 1", report)
 
     def test_main_pure_recommend_shortcut_uses_full_defaults(self):
         output = io.StringIO()
@@ -5233,6 +5326,59 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(row["recommended_guess"], "comfy")
         self.assertEqual(row["explanation"], "Used Human Mode override for slate ....Y.")
+
+    def test_hard_mode_recommendation_skips_illegal_human_override(self):
+        row = build_recommendation(
+            ("slate", "....Y"),
+            ("slate", "cider", "diner", "poker", "drown", "rocky"),
+            ("cider", "diner", "poker", "drown", "rocky"),
+            second_guess_pool_name="answers",
+            prior_policy="downweight",
+            prior_answer_weights={"cider": 0.05},
+            hard_mode=True,
+        )
+
+        self.assertNotEqual(row["recommended_guess"], "drown")
+        self.assertTrue(
+            is_hard_mode_legal_guess(
+                row["recommended_guess"],
+                (("slate", "....Y"),),
+            )
+        )
+        self.assertEqual(row["alternatives"][0]["guess"], row["recommended_guess"])
+        self.assertTrue(all(
+            is_hard_mode_legal_guess(
+                alternative["guess"],
+                (("slate", "....Y"),),
+            )
+            for alternative in row["alternatives"]
+        ))
+        self.assertIn(
+            "Skipped override drown because it is illegal in Hard Mode.",
+            row["explanation"],
+        )
+        self.assertEqual(row["hard_mode_skips"][0]["override"], "drown")
+
+    def test_hard_mode_strategy_skips_illegal_second_guess_override(self):
+        skips = []
+        game = play_second_map_game(
+            "cider",
+            ("slate", "cider", "diner", "poker", "drown"),
+            ("cider", "diner", "poker"),
+            "slate",
+            {"....Y": "drown"},
+            use_bucket_strategy=True,
+            probe_pool=("cider", "diner", "poker", "drown"),
+            override_patterns={"....Y"},
+            hard_mode=True,
+            hard_mode_skips=skips,
+        )
+
+        self.assertNotEqual(game.guesses[1], "drown")
+        self.assertTrue(
+            is_hard_mode_legal_guess(game.guesses[1], (("slate", "....Y"),))
+        )
+        self.assertEqual(skips[0]["override"], "drown")
 
     def test_print_recommendation_outputs_summary(self):
         output = io.StringIO()
