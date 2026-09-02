@@ -40,6 +40,7 @@ from src.wordle_lab.__main__ import (
     build_weighted_worst_pattern_rows,
     build_parser,
     build_full_second_map_rows,
+    build_human_recommendation,
     build_second_map_row_for_pattern,
     build_second_guess_map_rows,
     build_opener_strategy_comparison_rows,
@@ -5312,6 +5313,22 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["alternatives"][0]["guess"], "drown")
         self.assertEqual(row["alternatives"][0]["weighted_expected_remaining"], "1.00")
         self.assertIn("max_bucket", row)
+
+    def test_build_human_recommendation_adds_shared_mode_metadata(self):
+        row = build_human_recommendation(
+            ("slate", "....Y"),
+            allowed_guesses=("slate", "cider", "diner", "poker", "drown", "rocky"),
+            possible_answers=("cider", "diner", "poker", "drown", "rocky"),
+            prior_answer_weights={"cider": 0.05},
+            prior_weight_schedule_label="test schedule",
+        )
+
+        self.assertEqual(row["recommended_guess"], "drown")
+        self.assertEqual(row["candidates"], ("cider", "diner", "poker"))
+        self.assertEqual(row["mode_label"], "Human Balanced")
+        self.assertEqual(row["personality_label"], "Streak Protector")
+        self.assertEqual(row["prior_weight_schedule"], "test schedule")
+        self.assertEqual(row["trap_watch"], "No major trap family detected")
 
     def test_build_recommendation_uses_temporary_human_override(self):
         row = build_recommendation(
