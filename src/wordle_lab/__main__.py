@@ -1059,20 +1059,34 @@ def main(argv=None):
 
     if args.recommend:
         try:
-            row = build_recommendation(
-                args.state,
-                allowed_guesses,
-                possible_answers,
-                second_guess_pool_name=args.second_guess_pool,
-                prior_answers=prior_answers,
-                prior_policy=args.prior_policy,
-                prior_answer_weights=prior_answer_weights,
-                strategy=args.strategy or "second-map-bucket",
-                use_overrides=False if args.no_overrides else None,
-                recommend_top=args.recommend_top,
-                temporary_human_overrides=temporary_human_overrides,
-                hard_mode=args.hard_mode,
-            )
+            if args.human_recommend:
+                row = build_human_recommendation(
+                    args.state,
+                    allowed_guesses=allowed_guesses,
+                    possible_answers=possible_answers,
+                    prior_answer_weights=prior_answer_weights,
+                    prior_weight_schedule_label=active_prior_weight_schedule_label,
+                    strategy=args.strategy or "second-map-bucket",
+                    use_overrides=False if args.no_overrides else None,
+                    recommend_top=args.recommend_top,
+                    temporary_human_overrides=temporary_human_overrides,
+                    hard_mode=args.hard_mode,
+                )
+            else:
+                row = build_recommendation(
+                    args.state,
+                    allowed_guesses,
+                    possible_answers,
+                    second_guess_pool_name=args.second_guess_pool,
+                    prior_answers=prior_answers,
+                    prior_policy=args.prior_policy,
+                    prior_answer_weights=prior_answer_weights,
+                    strategy=args.strategy or "second-map-bucket",
+                    use_overrides=False if args.no_overrides else None,
+                    recommend_top=args.recommend_top,
+                    temporary_human_overrides=temporary_human_overrides,
+                    hard_mode=args.hard_mode,
+                )
         except ValueError as error:
             parser.error(str(error))
         if args.prior_policy == "downweight":
@@ -1895,6 +1909,7 @@ def build_recommendation(
     return {
         "path": format_tune_path_label(path_guesses, path_patterns),
         "remaining_count": len(candidates),
+        "candidates": tuple(candidates),
         "top_candidates": format_recommendation_candidates(candidates),
         "prior_weights": (
             format_prior_weights(candidates, prior_answer_weights)
@@ -1929,7 +1944,71 @@ def build_recommendation(
             override_pattern=path_patterns[0],
             skipped_override=skipped_override,
         ),
+        "trap_watch": (
+            "Potential trap family detected"
+            if is_trap_family(candidates)
+            else "No major trap family detected"
+        ),
     }
+
+
+def build_human_recommendation(
+    state_steps,
+    *,
+    allowed_guesses=None,
+    possible_answers=None,
+    prior_answer_weights=None,
+    prior_weight_schedule_label=None,
+    prior_weight_preset="current",
+    prior_weight_values=None,
+    as_of_date_text=None,
+    strategy="second-map-bucket",
+    use_overrides=None,
+    recommend_top=10,
+    temporary_human_overrides=None,
+    hard_mode=False,
+):
+    """Build a Human Mode recommendation for CLI and non-CLI clients."""
+    if allowed_guesses is None or possible_answers is None:
+        allowed_guesses, possible_answers = load_word_lists(
+            allowed_path=FULL_ALLOWED_GUESSES_PATH,
+            answers_path=FULL_ANSWERS_PATH,
+        )
+
+    if prior_answer_weights is None:
+        dated_prior_answers = load_dated_prior_answers(DEFAULT_PRIOR_ANSWERS_DATED_PATH)
+        as_of_date = resolve_as_of_date(as_of_date_text, dated_prior_answers)
+        schedule, prior_weight_schedule_label = resolve_prior_weight_schedule(
+            prior_weight_preset,
+            prior_weight_values,
+        )
+        prior_answer_weights = build_prior_answer_weights_for_schedule(
+            dated_prior_answers,
+            as_of_date,
+            schedule,
+        )
+
+    row = build_recommendation(
+        state_steps,
+        allowed_guesses,
+        possible_answers,
+        second_guess_pool_name="answers",
+        prior_policy="downweight",
+        prior_answer_weights=prior_answer_weights,
+        strategy=strategy,
+        use_overrides=use_overrides,
+        recommend_top=recommend_top,
+        temporary_human_overrides=temporary_human_overrides,
+        hard_mode=hard_mode,
+    )
+    row.update(
+        {
+            "mode_label": "Human Balanced",
+            "personality_label": "Streak Protector",
+            "prior_weight_schedule": prior_weight_schedule_label or prior_weight_preset,
+        }
+    )
+    return row
 
 
 def build_recommendation_alternatives(
