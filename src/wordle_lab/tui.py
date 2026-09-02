@@ -7,7 +7,7 @@ from textual.widgets import Button, Footer, Input, Static
 from .__main__ import build_human_recommendation
 
 
-DEFAULT_TUI_STATE = ("slate", "....Y", "drown", "GY...")
+INITIAL_TUI_STATE: tuple[str, ...] = ()
 MAX_GUESSES = 6
 CELL_STYLES = {
     "G": "bold white on #538d4e",
@@ -138,7 +138,7 @@ class HumanWordleBotApp(App[None]):
 
     def __init__(self, recommendation=None, recommendation_builder=None) -> None:
         super().__init__()
-        self.initial_state = DEFAULT_TUI_STATE
+        self.initial_state = INITIAL_TUI_STATE
         self.state_steps = self.initial_state
         self.game_over = False
         self.recommendation_builder = (
@@ -424,7 +424,7 @@ class HumanWordleBotApp(App[None]):
         )
 
     def _reset_session(self) -> None:
-        """Restore the initial in-memory scenario without persistence."""
+        """Restore the blank in-memory game without persistence."""
         self.state_steps = self.initial_state
         self.recommendation = self.initial_recommendation
         self.game_over = False

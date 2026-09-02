@@ -18,6 +18,7 @@ from src.wordle_lab.__main__ import (
     TUNE_PATH_COLUMNS,
     TUNE_PATH_BRANCH_COLUMNS,
     WORST_GAME_COLUMNS,
+    HUMAN_MODE_FIRST_GUESS,
     PRIOR_WEIGHT_PRESETS,
     PRIOR_WEIGHT_SCHEDULE_SEARCH_COLUMNS,
     apply_second_guess_overrides,
@@ -5329,6 +5330,25 @@ class CliTests(unittest.TestCase):
         self.assertEqual(row["personality_label"], "Streak Protector")
         self.assertEqual(row["prior_weight_schedule"], "test schedule")
         self.assertEqual(row["trap_watch"], "No major trap family detected")
+
+    def test_build_human_recommendation_supports_empty_state_with_opener(self):
+        row = build_human_recommendation(
+            (),
+            allowed_guesses=("slate", "cider", "diner", "poker"),
+            possible_answers=("slate", "cider", "diner", "poker"),
+            prior_answer_weights={"cider": 0.05},
+            prior_weight_schedule_label="test schedule",
+        )
+
+        self.assertEqual(row["path"], "")
+        self.assertEqual(row["recommended_guess"], HUMAN_MODE_FIRST_GUESS)
+        self.assertEqual(row["candidates"], ("slate", "cider", "diner", "poker"))
+        self.assertEqual(
+            row["explanation"],
+            "Start with slate, the configured Human Balanced opener.",
+        )
+        self.assertEqual(row["alternatives"][0]["guess"], HUMAN_MODE_FIRST_GUESS)
+        self.assertEqual(row["alternatives"][0]["note"], "Human Balanced opener")
 
     def test_build_recommendation_uses_temporary_human_override(self):
         row = build_recommendation(

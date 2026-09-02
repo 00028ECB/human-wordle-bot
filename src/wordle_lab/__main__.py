@@ -25,6 +25,7 @@ from .simulator import (
 
 FULL_ANSWERS_PATH = DEFAULT_ANSWERS_PATH.parent / "wordle_answers_full.txt"
 FULL_ALLOWED_GUESSES_PATH = DEFAULT_ALLOWED_GUESSES_PATH.parent / "wordle_allowed_guesses_full.txt"
+HUMAN_MODE_FIRST_GUESS = "slate"
 
 CSV_COLUMNS = (
     "first_guess",
@@ -1829,8 +1830,14 @@ def build_recommendation(
     recommend_top=5,
     temporary_human_overrides=None,
     hard_mode=False,
+    initial_guess=None,
 ):
-    path_guesses, path_patterns = parse_tune_path(state_steps, allowed_guesses)
+    if state_steps:
+        path_guesses, path_patterns = parse_tune_path(state_steps, allowed_guesses)
+    elif initial_guess is not None:
+        path_guesses, path_patterns = (), ()
+    else:
+        path_guesses, path_patterns = parse_tune_path(state_steps, allowed_guesses)
     history = tuple(zip(path_guesses, path_patterns))
     if hard_mode:
         validate_hard_mode_history(history)
@@ -1849,18 +1856,25 @@ def build_recommendation(
         raise ValueError("No legal guesses remain under the supplied Hard Mode state.")
     override_mode = None
     skipped_override = None
-    recommendation = find_recommendation_first_pattern_override(
-        path_guesses,
-        path_patterns,
-        second_guess_pool_name,
-        probe_pool,
-        strategy,
-        use_overrides,
-        prior_policy,
-        prior_answer_weights,
-        temporary_human_overrides,
-    )
-    if recommendation is not None:
+    if not path_guesses:
+        recommendation = initial_guess.lower()
+        if recommendation not in set(legal_probe_pool):
+            raise ValueError(
+                f"Initial guess {recommendation!r} is not in the selected guess pool."
+            )
+    else:
+        recommendation = find_recommendation_first_pattern_override(
+            path_guesses,
+            path_patterns,
+            second_guess_pool_name,
+            probe_pool,
+            strategy,
+            use_overrides,
+            prior_policy,
+            prior_answer_weights,
+            temporary_human_overrides,
+        )
+    if recommendation is not None and path_guesses:
         override_mode = (
             "Human Mode"
             if prior_policy == "downweight" and prior_answer_weights
@@ -1888,16 +1902,26 @@ def build_recommendation(
             prior_answer_weights=prior_answer_weights,
         )
 
-    alternatives = build_recommendation_alternatives(
-        candidates,
-        path_guesses,
-        legal_probe_pool,
-        recommendation,
-        prior_policy=prior_policy,
-        prior_answer_weights=prior_answer_weights,
-        limit=recommend_top,
-        override_mode=override_mode,
-    )
+    if path_guesses:
+        alternatives = build_recommendation_alternatives(
+            candidates,
+            path_guesses,
+            legal_probe_pool,
+            recommendation,
+            prior_policy=prior_policy,
+            prior_answer_weights=prior_answer_weights,
+            limit=recommend_top,
+            override_mode=override_mode,
+        )
+    else:
+        alternatives = (
+            build_recommendation_alternative_row(
+                recommendation,
+                candidates,
+                prior_answer_weights if prior_policy == "downweight" else None,
+                "Human Balanced opener",
+            ),
+        )
     bucket_sizes = sorted(feedback_bucket_sizes(recommendation, candidates), reverse=True)
     max_bucket = bucket_sizes[0] if bucket_sizes else 0
     expected_remaining = (
@@ -1940,8 +1964,8 @@ def build_recommendation(
             prior_policy,
             prior_answer_weights,
             override_mode=override_mode,
-            override_first=path_guesses[0],
-            override_pattern=path_patterns[0],
+            override_first=path_guesses[0] if path_guesses else None,
+            override_pattern=path_patterns[0] if path_patterns else None,
             skipped_override=skipped_override,
         ),
         "trap_watch": (
@@ -2000,7 +2024,12 @@ def build_human_recommendation(
         recommend_top=recommend_top,
         temporary_human_overrides=temporary_human_overrides,
         hard_mode=hard_mode,
+        initial_guess=HUMAN_MODE_FIRST_GUESS,
     )
+    if not state_steps:
+        row["explanation"] = (
+            f"Start with {HUMAN_MODE_FIRST_GUESS}, the configured Human Balanced opener."
+        )
     row.update(
         {
             "mode_label": "Human Balanced",

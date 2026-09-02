@@ -3,7 +3,7 @@ import unittest
 from textual.widgets import Button, Input, Static
 
 from src.wordle_lab.tui import (
-    DEFAULT_TUI_STATE,
+    INITIAL_TUI_STATE,
     HumanWordleBotApp,
     build_human_read,
     build_trap_read,
@@ -120,14 +120,26 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             "6 still live\nberry\nbuyer\n+ 4 more",
         )
 
-    def test_board_uses_configured_recommendation_state(self):
-        board = format_board(DEFAULT_TUI_STATE)
+    def test_board_formatter_colors_sample_state(self):
+        sample_state = ("slate", "....Y", "drown", "GY...")
+        board = format_board(sample_state)
 
         self.assertIn(" S ", board)
         self.assertIn(" D ", board)
         self.assertIn("#538d4e", board)
         self.assertIn("#b59f3b", board)
         self.assertIn("#3a3a3c", board)
+
+    async def test_dashboard_starts_with_blank_board(self):
+        app = HumanWordleBotApp(recommendation_fixture())
+
+        async with app.run_test(size=(100, 30)):
+            board_text = str(app.query_one("#board-content", Static)._content)
+            status_text = str(app.query_one("#entry-status", Static)._content)
+
+            self.assertEqual(app.state_steps, INITIAL_TUI_STATE)
+            self.assertEqual(board_text, "")
+            self.assertIn("Guess 1 of 6", status_text)
 
     async def test_valid_entry_updates_board_and_recommendation(self):
         updated_recommendation = {
@@ -162,9 +174,9 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             status_text = str(app.query_one("#entry-status", Static)._content)
 
             self.assertIn(" C ", board_text)
-            self.assertIn("G.Y..", requested_states[0])
+            self.assertEqual(requested_states[0], ("crane", "G.Y.."))
             self.assertIn("CIGAR", recommendation_text)
-            self.assertIn("next is 4 of 6", status_text)
+            self.assertIn("next is 2 of 6", status_text)
             self.assertFalse(app.query_one("#add-result", Button).disabled)
             self.assertEqual(app.query_one("#guess-input", Input).value, "")
             self.assertEqual(app.query_one("#feedback-input", Input).value, "")
@@ -177,7 +189,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             board_text = str(app.query_one("#board-content", Static)._content)
             self.assertIn(" I ", board_text)
             self.assertEqual(len(requested_states), 2)
-            self.assertEqual(len(app.state_steps) // 2, 4)
+            self.assertEqual(len(app.state_steps) // 2, 2)
             self.assertFalse(app.query_one("#add-result", Button).disabled)
 
     async def test_all_green_completes_session_without_requesting_next_guess(self):
@@ -207,7 +219,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(" B ", board_text)
             self.assertIn("SOLVED", recommendation_text)
             self.assertIn("BEECH", recommendation_text)
-            self.assertIn("Solved in 3 of 6", status_text)
+            self.assertIn("Solved in 1 of 6", status_text)
             self.assertEqual(requested_states, [])
             self.assertTrue(app.game_over)
             self.assertTrue(app.query_one("#add-result", Button).disabled)
@@ -219,7 +231,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async with app.run_test(size=(100, 30)) as pilot:
-            for guess in ("crane", "cigar", "pound", "fever"):
+            for guess in ("crane", "cigar", "pound", "fever", "humph", "blaze"):
                 app.query_one("#guess-input", Input).value = guess
                 app.query_one("#feedback-input", Input).value = "bbbbb"
                 await pilot.press("enter")
@@ -253,10 +265,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
             status_text = str(app.query_one("#entry-status", Static)._content)
 
-            self.assertEqual(app.state_steps, DEFAULT_TUI_STATE)
-            self.assertNotIn(" B ", board_text)
+            self.assertEqual(app.state_steps, INITIAL_TUI_STATE)
+            self.assertEqual(board_text, "")
             self.assertIn("FURRY", recommendation_text)
-            self.assertIn("Guess 3 of 6", status_text)
+            self.assertIn("Guess 1 of 6", status_text)
             self.assertFalse(app.game_over)
             self.assertFalse(app.query_one("#add-result", Button).disabled)
 

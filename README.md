@@ -26,9 +26,9 @@ Launch it with:
 python -m src.wordle_lab.tui
 ```
 
-The dashboard opens on an included in-progress example and uses the real Human
-Mode recommendation engine. Enter a five-letter guess and a five-character result,
-then press Enter or select **Add**. Feedback uses:
+The dashboard opens with a blank board and an initial Human Balanced opener from
+the real Human Mode recommendation engine. Enter the guess you played and its
+five-character result, then press Enter or select **Add**. Feedback uses:
 
 - `g` for green
 - `y` for yellow
@@ -36,7 +36,7 @@ then press Enter or select **Add**. Feedback uses:
 
 For example, `gbybb` means green, gray, yellow, gray, gray. The assistant updates
 the board and recommendation after each result, stops when the word is solved or
-six rows are used, and provides **Reset** to restore the starting example.
+six rows are used, and provides **Reset** to start a new blank game.
 
 The TUI is an in-memory assistant only. It does not save games, daily history, or
 state between launches.
