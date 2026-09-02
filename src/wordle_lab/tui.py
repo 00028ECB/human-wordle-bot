@@ -355,13 +355,11 @@ class HumanWordleBotApp(App[None]):
             if self._guess_count() >= MAX_GUESSES:
                 self._complete_session()
                 return
-            guess_input.value = ""
-            feedback_input.value = ""
             status.update(
                 f"[green]Guess {self._guess_count()} added[/] · "
                 f"next is {self._guess_count() + 1} of {MAX_GUESSES}"
             )
-            guess_input.focus()
+            self._clear_entry_fields()
 
     def _guess_count(self) -> int:
         return len(self.state_steps) // 2
@@ -373,6 +371,13 @@ class HumanWordleBotApp(App[None]):
         self.query_one("#guess-input", Input).disabled = not enabled
         self.query_one("#feedback-input", Input).disabled = not enabled
         self.query_one("#add-result", Button).disabled = not enabled
+
+    def _clear_entry_fields(self) -> None:
+        """Clear the result form and return focus to the guess field."""
+        guess_input = self.query_one("#guess-input", Input)
+        guess_input.value = ""
+        self.query_one("#feedback-input", Input).value = ""
+        guess_input.focus()
 
     def _complete_session(self, solved_guess=None, detail=None) -> None:
         """Stop entry and show a friendly solved or game-over state."""
@@ -425,13 +430,9 @@ class HumanWordleBotApp(App[None]):
         self.game_over = False
         self.query_one("#board-content", Static).update(format_board(self.state_steps))
         self._refresh_recommendation(self.recommendation)
-        guess_input = self.query_one("#guess-input", Input)
-        feedback_input = self.query_one("#feedback-input", Input)
-        guess_input.value = ""
-        feedback_input.value = ""
         self._set_entry_enabled(True)
         self.query_one("#entry-status", Static).update(self._next_guess_status())
-        guess_input.focus()
+        self._clear_entry_fields()
 
     def _refresh_recommendation(self, recommendation) -> None:
         """Refresh recommendation-backed display panels after valid entry."""
