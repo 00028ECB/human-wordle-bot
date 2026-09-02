@@ -8,6 +8,7 @@ from .__main__ import build_human_recommendation
 
 
 DEFAULT_TUI_STATE = ("slate", "....Y", "drown", "GY...")
+MAX_GUESSES = 6
 CELL_STYLES = {
     "G": "bold white on #538d4e",
     "Y": "bold white on #b59f3b",
@@ -105,7 +106,7 @@ def format_next_guess(recommendation) -> str:
     return (
         "Recommended\n"
         f"[bold]{recommendation['recommended_guess'].upper()}[/]\n"
-        f"{recommendation['recommendation_type']} · {risk.lower()} risk"
+        f"{recommendation['recommendation_type']} · {risk}"
     )
 
 
@@ -129,7 +130,7 @@ class DashboardPanel(Vertical):
 
 
 class HumanWordleBotApp(App[None]):
-    """Human Mode dashboard with one-result entry support."""
+    """Human Mode dashboard with an in-memory six-guess session."""
 
     TITLE = "Human Wordle Bot"
     SUB_TITLE = "Human Balanced · Streak Protector"
@@ -137,7 +138,9 @@ class HumanWordleBotApp(App[None]):
 
     def __init__(self, recommendation=None, recommendation_builder=None) -> None:
         super().__init__()
-        self.state_steps = DEFAULT_TUI_STATE
+        self.initial_state = DEFAULT_TUI_STATE
+        self.state_steps = self.initial_state
+        self.game_over = False
         self.recommendation_builder = (
             build_human_recommendation
             if recommendation_builder is None
@@ -148,6 +151,7 @@ class HumanWordleBotApp(App[None]):
             if recommendation is None
             else recommendation
         )
+        self.initial_recommendation = self.recommendation
 
     CSS = """
     Screen {
@@ -167,11 +171,11 @@ class HumanWordleBotApp(App[None]):
 
     #dashboard {
         height: 1fr;
-        padding: 1 2 0 2;
+        padding: 0 2;
     }
 
     #top-row {
-        height: 8;
+        height: 10;
     }
 
     #bottom-row {
@@ -184,17 +188,24 @@ class HumanWordleBotApp(App[None]):
     }
 
     #guess-input {
-        width: 18;
+        width: 14;
         margin-right: 1;
     }
 
     #feedback-input {
-        width: 22;
+        width: 18;
         margin-right: 1;
     }
 
     #add-result {
-        width: 14;
+        width: 10;
+        min-width: 10;
+        margin-right: 1;
+    }
+
+    #reset-game {
+        width: 10;
+        min-width: 10;
         margin-right: 1;
     }
 
@@ -236,7 +247,6 @@ class HumanWordleBotApp(App[None]):
 
     #board-panel .section-content {
         text-align: center;
-        padding-top: 1;
     }
 
     #recommendation-panel .section-content {
@@ -296,24 +306,29 @@ class HumanWordleBotApp(App[None]):
             with Horizontal(id="entry-row"):
                 yield Input(placeholder="Guess", id="guess-input", max_length=5)
                 yield Input(
-                    placeholder="Feedback: g/y/b",
+                    placeholder="g/y/b result",
                     id="feedback-input",
                     max_length=5,
                 )
-                yield Button("Add result", id="add-result", variant="primary")
-                yield Static("Ready", id="entry-status")
+                yield Button("Add", id="add-result", variant="primary")
+                yield Button("Reset", id="reset-game")
+                yield Static(self._next_guess_status(), id="entry-status")
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Add the entered result when the submit button is pressed."""
+        """Handle result submission and session reset actions."""
         if event.button.id == "add-result":
             self._submit_entry()
+        elif event.button.id == "reset-game":
+            self._reset_session()
 
     def on_input_submitted(self, _event: Input.Submitted) -> None:
         """Allow Enter in either field to submit the result."""
         self._submit_entry()
 
     def _submit_entry(self) -> None:
+        if self.game_over:
+            return
         guess_input = self.query_one("#guess-input", Input)
         feedback_input = self.query_one("#feedback-input", Input)
         status = self.query_one("#entry-status", Static)
@@ -325,21 +340,98 @@ class HumanWordleBotApp(App[None]):
 
         self.state_steps = (*self.state_steps, guess, pattern)
         self.query_one("#board-content", Static).update(format_board(self.state_steps))
+
+        if pattern == "GGGGG":
+            self._complete_session(solved_guess=guess)
+            return
+
         try:
             recommendation = self.recommendation_builder(self.state_steps)
         except (FileNotFoundError, ValueError) as error:
-            self.query_one("#recommendation-content", Static).update(
-                "Recommendation unavailable"
-            )
-            status.update(f"[yellow]Board updated: {error}[/]")
+            self._complete_session(detail=f"No recommendation: {error}")
         else:
             self.recommendation = recommendation
             self._refresh_recommendation(recommendation)
-            status.update("[green]Result added[/]")
+            if self._guess_count() >= MAX_GUESSES:
+                self._complete_session()
+                return
+            guess_input.value = ""
+            feedback_input.value = ""
+            status.update(
+                f"[green]Guess {self._guess_count()} added[/] · "
+                f"next is {self._guess_count() + 1} of {MAX_GUESSES}"
+            )
+            guess_input.focus()
 
-        guess_input.disabled = True
-        feedback_input.disabled = True
-        self.query_one("#add-result", Button).disabled = True
+    def _guess_count(self) -> int:
+        return len(self.state_steps) // 2
+
+    def _next_guess_status(self) -> str:
+        return f"Guess {self._guess_count() + 1} of {MAX_GUESSES}"
+
+    def _set_entry_enabled(self, enabled: bool) -> None:
+        self.query_one("#guess-input", Input).disabled = not enabled
+        self.query_one("#feedback-input", Input).disabled = not enabled
+        self.query_one("#add-result", Button).disabled = not enabled
+
+    def _complete_session(self, solved_guess=None, detail=None) -> None:
+        """Stop entry and show a friendly solved or game-over state."""
+        self.game_over = True
+        self._set_entry_enabled(False)
+        header = self.query_one("#app-header", Static)
+        recommendation = self.query_one("#recommendation-content", Static)
+        candidates = self.query_one("#candidates-content", Static)
+        human_read = self.query_one("#human-read-content", Static)
+        trap_watch = self.query_one("#trap-watch-content", Static)
+        status = self.query_one("#entry-status", Static)
+
+        if solved_guess:
+            header.update(
+                "Human Wordle Bot\nMode: Human Balanced · "
+                "Personality: Streak Protector · Solved"
+            )
+            recommendation.update(f"SOLVED\n[bold]{solved_guess.upper()}[/]\nNice work")
+            candidates.update(f"Solved answer\n{solved_guess}")
+            human_read.update("That’s the one. Nicely played—the streak is safe.")
+            trap_watch.update("Game complete\nNo traps left to navigate.")
+            status.update(
+                f"[green]Solved in {self._guess_count()} of {MAX_GUESSES}[/] · Reset"
+            )
+            return
+
+        header.update(
+            "Human Wordle Bot\nMode: Human Balanced · "
+            "Personality: Streak Protector · Game over"
+        )
+        recommendation.update(
+            "SESSION STOPPED\nNo matching answers\nReset to revise"
+            if detail
+            else "GAME OVER\nSix rows used\nReset to try again"
+        )
+        human_read.update(
+            detail or "That’s six. Tough branch—reset when you’re ready for another run."
+        )
+        trap_watch.update("Session complete\nNo more guesses accepted.")
+        status.update(
+            "[yellow]Session stopped[/] · Reset"
+            if detail
+            else "[yellow]Game over[/] · Reset"
+        )
+
+    def _reset_session(self) -> None:
+        """Restore the initial in-memory scenario without persistence."""
+        self.state_steps = self.initial_state
+        self.recommendation = self.initial_recommendation
+        self.game_over = False
+        self.query_one("#board-content", Static).update(format_board(self.state_steps))
+        self._refresh_recommendation(self.recommendation)
+        guess_input = self.query_one("#guess-input", Input)
+        feedback_input = self.query_one("#feedback-input", Input)
+        guess_input.value = ""
+        feedback_input.value = ""
+        self._set_entry_enabled(True)
+        self.query_one("#entry-status", Static).update(self._next_guess_status())
+        guess_input.focus()
 
     def _refresh_recommendation(self, recommendation) -> None:
         """Refresh recommendation-backed display panels after valid entry."""

@@ -164,8 +164,101 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(" C ", board_text)
             self.assertIn("G.Y..", requested_states[0])
             self.assertIn("CIGAR", recommendation_text)
-            self.assertIn("Result added", status_text)
+            self.assertIn("next is 4 of 6", status_text)
+            self.assertFalse(app.query_one("#add-result", Button).disabled)
+            self.assertEqual(app.query_one("#guess-input", Input).value, "")
+            self.assertEqual(app.query_one("#feedback-input", Input).value, "")
+
+            app.query_one("#guess-input", Input).value = "cigar"
+            app.query_one("#feedback-input", Input).value = "bgybb"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            board_text = str(app.query_one("#board-content", Static)._content)
+            self.assertIn(" I ", board_text)
+            self.assertEqual(len(requested_states), 2)
+            self.assertEqual(len(app.state_steps) // 2, 4)
+            self.assertFalse(app.query_one("#add-result", Button).disabled)
+
+    async def test_all_green_completes_session_without_requesting_next_guess(self):
+        requested_states = []
+
+        def recommendation_builder(state_steps):
+            requested_states.append(state_steps)
+            return recommendation_fixture()
+
+        app = HumanWordleBotApp(
+            recommendation_fixture(),
+            recommendation_builder=recommendation_builder,
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.query_one("#guess-input", Input).value = "beech"
+            app.query_one("#feedback-input", Input).value = "ggggg"
+            await pilot.click("#add-result")
+            await pilot.pause()
+
+            board_text = str(app.query_one("#board-content", Static)._content)
+            recommendation_text = str(
+                app.query_one("#recommendation-content", Static)._content
+            )
+            status_text = str(app.query_one("#entry-status", Static)._content)
+
+            self.assertIn(" B ", board_text)
+            self.assertIn("SOLVED", recommendation_text)
+            self.assertIn("BEECH", recommendation_text)
+            self.assertIn("Solved in 3 of 6", status_text)
+            self.assertEqual(requested_states, [])
+            self.assertTrue(app.game_over)
             self.assertTrue(app.query_one("#add-result", Button).disabled)
+
+    async def test_sixth_guess_ends_session(self):
+        app = HumanWordleBotApp(
+            recommendation_fixture(),
+            recommendation_builder=lambda _state: recommendation_fixture(),
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            for guess in ("crane", "cigar", "pound", "fever"):
+                app.query_one("#guess-input", Input).value = guess
+                app.query_one("#feedback-input", Input).value = "bbbbb"
+                await pilot.press("enter")
+                await pilot.pause()
+
+            recommendation_text = str(
+                app.query_one("#recommendation-content", Static)._content
+            )
+            status_text = str(app.query_one("#entry-status", Static)._content)
+
+            self.assertEqual(len(app.state_steps) // 2, 6)
+            self.assertIn("GAME OVER", recommendation_text)
+            self.assertIn("Game over", status_text)
+            self.assertTrue(app.game_over)
+            self.assertTrue(app.query_one("#add-result", Button).disabled)
+
+    async def test_reset_restores_initial_session(self):
+        app = HumanWordleBotApp(recommendation_fixture())
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.query_one("#guess-input", Input).value = "beech"
+            app.query_one("#feedback-input", Input).value = "ggggg"
+            await pilot.click("#add-result")
+            await pilot.pause()
+            await pilot.click("#reset-game")
+            await pilot.pause()
+
+            board_text = str(app.query_one("#board-content", Static)._content)
+            recommendation_text = str(
+                app.query_one("#recommendation-content", Static)._content
+            )
+            status_text = str(app.query_one("#entry-status", Static)._content)
+
+            self.assertEqual(app.state_steps, DEFAULT_TUI_STATE)
+            self.assertNotIn(" B ", board_text)
+            self.assertIn("FURRY", recommendation_text)
+            self.assertIn("Guess 3 of 6", status_text)
+            self.assertFalse(app.game_over)
+            self.assertFalse(app.query_one("#add-result", Button).disabled)
 
     async def test_invalid_entry_shows_error_without_updating_board(self):
         app = HumanWordleBotApp(recommendation_fixture())
