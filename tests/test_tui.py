@@ -1,6 +1,6 @@
 import unittest
 
-from textual.widgets import Static
+from textual.widgets import Button, Input, Static
 
 from src.wordle_lab.tui import (
     DEFAULT_TUI_STATE,
@@ -10,6 +10,7 @@ from src.wordle_lab.tui import (
     classify_risk,
     format_board,
     format_candidates,
+    validate_entry,
 )
 
 
@@ -28,6 +29,23 @@ def recommendation_fixture():
 
 
 class TuiTests(unittest.IsolatedAsyncioTestCase):
+    def test_entry_validation_normalizes_solver_feedback(self):
+        self.assertEqual(validate_entry(" Crane ", "gbybb"), ("crane", "G.Y.."))
+
+    def test_entry_validation_rejects_invalid_guess(self):
+        for guess in ("four", "longer", "ab1de", "élate"):
+            with self.subTest(guess=guess), self.assertRaisesRegex(
+                ValueError,
+                "Guess must be exactly 5 letters",
+            ):
+                validate_entry(guess, "gbybb")
+
+    def test_entry_validation_rejects_invalid_feedback(self):
+        with self.assertRaisesRegex(ValueError, "exactly 5 characters"):
+            validate_entry("crane", "gybb")
+        with self.assertRaisesRegex(ValueError, "only use g, y, or b"):
+            validate_entry("crane", "gygbx")
+
     async def test_dashboard_renders_all_major_sections(self):
         app = HumanWordleBotApp(recommendation_fixture())
 
@@ -59,7 +77,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIn("FURRY", screen_text)
-        self.assertIn("6 still live\nberry\nbuyer\ncheer\ncyber\n+ 2 more", screen_text)
+        self.assertIn("6 still live\nberry\nbuyer\n+ 4 more", screen_text)
         self.assertIn("Chose furry using bucket safety.", screen_text)
         self.assertIn("A calm, streak-safe line", screen_text)
         self.assertIn("All clear", screen_text)
@@ -69,6 +87,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         recommendation = recommendation_fixture()
 
         self.assertEqual(classify_risk(recommendation), "Low")
+        self.assertEqual(
+            classify_risk({**recommendation, "remaining_count": 1, "max_bucket": 1}),
+            "Low",
+        )
         self.assertEqual(
             classify_risk({**recommendation, "remaining_count": 10, "max_bucket": 5}),
             "Medium",
@@ -106,6 +128,61 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("#538d4e", board)
         self.assertIn("#b59f3b", board)
         self.assertIn("#3a3a3c", board)
+
+    async def test_valid_entry_updates_board_and_recommendation(self):
+        updated_recommendation = {
+            **recommendation_fixture(),
+            "candidates": ("cigar", "circa"),
+            "recommended_guess": "cigar",
+            "recommendation_type": "answer",
+            "remaining_count": 2,
+            "max_bucket": 1,
+        }
+        requested_states = []
+
+        def recommendation_builder(state_steps):
+            requested_states.append(state_steps)
+            return updated_recommendation
+
+        app = HumanWordleBotApp(
+            recommendation_fixture(),
+            recommendation_builder=recommendation_builder,
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.query_one("#guess-input", Input).value = "crane"
+            app.query_one("#feedback-input", Input).value = "gbybb"
+            await pilot.click("#add-result")
+            await pilot.pause()
+
+            board_text = str(app.query_one("#board-content", Static)._content)
+            recommendation_text = str(
+                app.query_one("#recommendation-content", Static)._content
+            )
+            status_text = str(app.query_one("#entry-status", Static)._content)
+
+            self.assertIn(" C ", board_text)
+            self.assertIn("G.Y..", requested_states[0])
+            self.assertIn("CIGAR", recommendation_text)
+            self.assertIn("Result added", status_text)
+            self.assertTrue(app.query_one("#add-result", Button).disabled)
+
+    async def test_invalid_entry_shows_error_without_updating_board(self):
+        app = HumanWordleBotApp(recommendation_fixture())
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            original_board = str(app.query_one("#board-content", Static)._content)
+            app.query_one("#guess-input", Input).value = "four"
+            app.query_one("#feedback-input", Input).value = "gbybb"
+            await pilot.click("#add-result")
+            await pilot.pause()
+
+            status_text = str(app.query_one("#entry-status", Static)._content)
+            board_text = str(app.query_one("#board-content", Static)._content)
+
+            self.assertIn("Guess must be exactly 5 letters", status_text)
+            self.assertEqual(board_text, original_board)
+            self.assertFalse(app.query_one("#add-result", Button).disabled)
 
     async def test_q_quits_dashboard(self):
         app = HumanWordleBotApp(recommendation_fixture())
