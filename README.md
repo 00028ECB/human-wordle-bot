@@ -13,33 +13,35 @@ No web app, network access, API keys, or secrets are needed.
 
 ## Human Wordle Bot TUI
 
-The optional terminal dashboard uses Textual. Install its dependencies from the
-repository root:
+The Textual dashboard is an in-terminal assistant for a real Wordle game. It
+recommends an opening guess, tracks up to six guesses, and refreshes its likely
+answers and next recommendation after each result.
+
+From the repository root, install the dependencies:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-Launch it with:
+Then launch the dashboard:
 
 ```bash
 python -m src.wordle_lab.tui
 ```
 
-The dashboard opens with a blank board and an initial Human Balanced opener from
-the real Human Mode recommendation engine. Enter the guess you played and its
-five-character result, then press Enter or select **Add**. Feedback uses:
+The board starts blank. Play the recommended opener in Wordle, enter the guess
+you played and its five-character feedback, then press Enter or select **Add**.
+Use:
 
 - `g` for green
 - `y` for yellow
 - `b` for black/gray
 
-For example, `gbybb` means green, gray, yellow, gray, gray. The assistant updates
-the board and recommendation after each result, stops when the word is solved or
-six rows are used, and provides **Reset** to start a new blank game.
+For example, if Wordle shows black, green, black, yellow, black, enter `bgbyb`.
+Select **Reset** to start a fresh blank session, or press `q` to quit.
 
-The TUI is an in-memory assistant only. It does not save games, daily history, or
-state between launches.
+The TUI keeps the current session in memory only. It does not save games, daily
+history, or state between launches.
 
 ## Current Champions
 
