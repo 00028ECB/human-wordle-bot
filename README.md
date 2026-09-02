@@ -9,7 +9,18 @@ Wordle Lab supports both Pure Mode benchmarking and Human Mode daily recommendat
 - All scoring uses normal Wordle green/yellow/gray feedback logic.
 - Everything runs locally from the command line.
 
-No web app, network access, packages, API keys, or secrets are needed.
+No web app, network access, API keys, or secrets are needed. The optional terminal
+dashboard uses Textual; install its dependency with:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Launch the Human Wordle Bot dashboard with:
+
+```bash
+python -m src.wordle_lab.tui
+```
 
 ## Current Champions
 
