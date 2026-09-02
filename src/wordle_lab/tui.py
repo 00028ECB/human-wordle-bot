@@ -28,6 +28,52 @@ def format_board(state_steps: tuple[str, ...]) -> str:
     return "\n".join(rows)
 
 
+def classify_risk(recommendation) -> str:
+    """Translate bucket exposure into a friendly display-level risk label."""
+    remaining = max(int(recommendation["remaining_count"]), 1)
+    max_bucket = int(recommendation["max_bucket"])
+    exposure = max_bucket / remaining
+    if max_bucket <= 2 and exposure <= 0.34:
+        return "Low"
+    if exposure <= 0.60:
+        return "Medium"
+    return "High"
+
+
+def format_candidates(recommendation, limit: int = 4) -> str:
+    """Summarize the most likely answers without crowding the panel."""
+    candidates = recommendation["candidates"]
+    lines = [f"{len(candidates)} still live", *candidates[:limit]]
+    if len(candidates) > limit:
+        lines.append(f"+ {len(candidates) - limit} more")
+    return "\n".join(lines)
+
+
+def build_human_read(recommendation) -> str:
+    """Add Streak Protector voice to the solver's existing explanation."""
+    explanation = recommendation["explanation"].rstrip()
+    if explanation and explanation[-1] not in ".!?":
+        explanation += "."
+    risk = classify_risk(recommendation)
+    if recommendation["trap_watch"] != "No major trap family detected":
+        personality_read = "This branch deserves care—coverage beats a hopeful coin flip."
+    elif risk == "Low":
+        personality_read = "A calm, streak-safe line with very little left to chance."
+    elif risk == "Medium":
+        personality_read = "A balanced line, but keep some respect for the branch risk."
+    else:
+        personality_read = "Protect the streak here; information matters more than speed."
+    return f"{explanation} {personality_read}"
+
+
+def build_trap_read(recommendation) -> str:
+    """Turn trap detection into concise assistant-facing guidance."""
+    trap_watch = recommendation["trap_watch"]
+    if trap_watch == "No major trap family detected":
+        return f"All clear\n{trap_watch}\nRisk stays {classify_risk(recommendation).lower()}."
+    return f"Heads up\n{trap_watch}\nFavor letter coverage."
+
+
 class DashboardPanel(Vertical):
     """A consistently styled dashboard section."""
 
@@ -139,15 +185,13 @@ class HumanWordleBotApp(App[None]):
     def compose(self) -> ComposeResult:
         """Build the read-only recommendation dashboard."""
         recommendation = self.recommendation
-        candidates = recommendation["candidates"]
-        candidate_text = "\n".join(candidates[:5])
-        if len(candidates) > 5:
-            candidate_text += f"\n+ {len(candidates) - 5} more"
+        risk = classify_risk(recommendation)
 
         yield Static(
             "Human Wordle Bot\n"
-            f"{recommendation['mode_label']} · "
-            f"{recommendation['personality_label']}",
+            f"Mode: {recommendation['mode_label']} · "
+            f"Personality: {recommendation['personality_label']} · "
+            f"Risk: {risk}",
             id="app-header",
         )
         with Vertical(id="dashboard"):
@@ -158,26 +202,26 @@ class HumanWordleBotApp(App[None]):
                     panel_id="board-panel",
                 )
                 yield DashboardPanel(
-                    "RECOMMENDATION",
-                    "Next guess\n\n"
+                    "NEXT GUESS",
+                    "Recommended\n\n"
                     f"[bold]{recommendation['recommended_guess'].upper()}[/]\n"
-                    f"{recommendation['recommendation_type']}",
+                    f"{recommendation['recommendation_type']} · {risk.lower()} risk",
                     panel_id="recommendation-panel",
                 )
                 yield DashboardPanel(
-                    "CANDIDATES",
-                    candidate_text,
+                    "LIKELY ANSWERS",
+                    format_candidates(recommendation),
                     panel_id="candidates-panel",
                 )
             with Horizontal(id="bottom-row"):
                 yield DashboardPanel(
-                    "HUMAN REASONING",
-                    recommendation["explanation"],
+                    "HUMAN READ",
+                    build_human_read(recommendation),
                     panel_id="reasoning-panel",
                 )
                 yield DashboardPanel(
                     "TRAP WATCH",
-                    recommendation["trap_watch"],
+                    build_trap_read(recommendation),
                     panel_id="trap-panel",
                 )
         yield Footer()
